@@ -39,7 +39,9 @@ fn midpoint(low: &[u8], high: Option<&[u8]>, out: &mut String) {
         }
     }
     let low_digit = low.first().map_or(0, |d| value(*d));
-    let high_digit = high.and_then(|h| h.first()).map_or(DIGITS.len(), |d| value(*d));
+    let high_digit = high
+        .and_then(|h| h.first())
+        .map_or(DIGITS.len(), |d| value(*d));
     if high.is_none() && !low.is_empty() && low_digit + 1 < DIGITS.len() {
         // Appending at the end is the common case. Stepping by one instead of
         // halving the remaining space keeps the keys of a long note short.

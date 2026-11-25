@@ -30,6 +30,8 @@ export interface RecoveryKit {
 export interface NoteSummary {
   note_id: string;
   title: string;
+  /** Folder path like "Work/Plans"; empty outside of all folders. */
+  folder: string;
   preview: string;
   updated_ms: number;
 }
@@ -46,6 +48,7 @@ export interface Block {
 export interface Note {
   note_id: string;
   title: string;
+  folder: string;
   updated_ms: number;
   blocks: Block[];
 }
@@ -137,8 +140,22 @@ export class Notes {
     return Notes.parse(this.app.getNote(noteId));
   }
 
-  public async createNote(): Promise<Note> {
-    return Notes.parse(await this.app.createNote());
+  public async createNote(folder: string): Promise<Note> {
+    return Notes.parse(await this.app.createNote(folder));
+  }
+
+  public async setFolder(noteId: string, folder: string): Promise<void> {
+    await this.app.setFolder(noteId, folder);
+  }
+
+  /** Encrypts a file and adds it to the note after `after` (or at the top). */
+  public async addAttachment(noteId: string, after: string | null, name: string, mime: string, data: Uint8Array): Promise<Block> {
+    return Notes.parse(await this.app.addAttachment(noteId, after ?? undefined, name, mime, data));
+  }
+
+  /** The decrypted file of an attachment block. */
+  public async attachment(blockId: string): Promise<Uint8Array<ArrayBuffer>> {
+    return (await this.app.attachment(blockId)) as Uint8Array<ArrayBuffer>;
   }
 
   public async setTitle(noteId: string, title: string): Promise<void> {

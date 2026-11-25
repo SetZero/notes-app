@@ -1,7 +1,8 @@
-import { useEffect, useRef, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
 import type { Block, BlockKind } from "../core";
 import type { EditorViewModel } from "../viewmodels/EditorViewModel";
 import { useViewModel } from "../viewmodels/ViewModel";
+import { Attachment } from "./Attachment";
 import { AutoTextarea } from "./AutoTextarea";
 
 const KINDS: [BlockKind, string][] = [
@@ -17,9 +18,15 @@ function atEdge(area: HTMLTextAreaElement, direction: -1 | 1): boolean {
   return direction === -1 ? !area.value.slice(0, area.selectionStart).includes("\n") : !area.value.slice(area.selectionEnd).includes("\n");
 }
 
+/** The block a paste or drop happened in, so files land right below it. */
+function blockAt(target: EventTarget): string | null {
+  return target instanceof Element ? (target.closest<HTMLElement>("[data-block-id]")?.dataset.blockId ?? null) : null;
+}
+
 export function Editor({ editor }: { editor: EditorViewModel }) {
   const state = useViewModel(editor);
   const container = useRef<HTMLDivElement>(null);
+  const [dragging, setDragging] = useState(false);
 
   // Put the caret where the view model asked for it.
   const focus = state.focus;
@@ -41,6 +48,29 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
       </div>
     );
   }
+
+  const paste = (event: ClipboardEvent<HTMLDivElement>) => {
+    const files = [...event.clipboardData.files];
+    if (files.length === 0) return; // Plain text: the textarea handles it.
+    event.preventDefault();
+    editor.attachFiles(files, blockAt(event.target));
+  };
+
+  const hasFiles = (event: DragEvent) => event.dataTransfer.types.includes("Files");
+
+  const dragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setDragging(true);
+  };
+
+  const drop = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    setDragging(false);
+    editor.attachFiles([...event.dataTransfer.files], blockAt(event.target));
+  };
 
   const titleKey = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" || (event.key === "ArrowDown" && atEdge(event.currentTarget, 1))) {
@@ -73,7 +103,14 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
   };
 
   return (
-    <div className="editor" ref={container}>
+    <div
+      className={`editor${dragging ? " dragging" : ""}`}
+      ref={container}
+      onPaste={paste}
+      onDragOver={dragOver}
+      onDragLeave={() => setDragging(false)}
+      onDrop={drop}
+    >
       {state.problem && (
         <p className="problem" role="alert">
           {state.problem}{" "}
@@ -94,12 +131,12 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
       />
 
       {state.blocks.map((block) => (
-        <div key={block.block_id} className={`block ${block.kind}${block.attrs.done === "true" ? " done" : ""}`}>
+        <div key={block.block_id} data-block-id={block.block_id} className={`block ${block.kind}${block.attrs.done === "true" ? " done" : ""}`}>
           {block.kind === "todo" && (
             <input type="checkbox" aria-label="Done" checked={block.attrs.done === "true"} onChange={() => editor.toggleDone(block.block_id)} />
           )}
           {block.kind === "attachment" ? (
-            <p className="muted">Attachment (cannot be shown in the web app yet)</p>
+            <Attachment editor={editor} block={block} media={state.media[block.block_id]} />
           ) : (
             <AutoTextarea
               data-focus-id={block.block_id}
@@ -128,6 +165,8 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
           </div>
         </div>
       ))}
+
+      {state.attaching > 0 && <p className="muted">Encrypting {state.attaching === 1 ? "file" : `${state.attaching} files`}…</p>}
 
       <button className="tail" aria-label="Add text at the end" onClick={() => editor.appendBlock()} />
     </div>

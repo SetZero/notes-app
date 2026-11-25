@@ -216,8 +216,38 @@ impl NotesApp {
     }
 
     #[wasm_bindgen(js_name = createNote)]
-    pub fn create_note(&self) -> js_sys::Promise {
-        promise!(self, |core| core.create_note().await.map(|note| json(&note)))
+    pub fn create_note(&self, folder: String) -> js_sys::Promise {
+        promise!(self, |core| core.create_note(&folder).await.map(|note| json(&note)))
+    }
+
+    /// `folder` is a path like "Work/Plans"; empty for no folder.
+    #[wasm_bindgen(js_name = setFolder)]
+    pub fn set_folder(&self, note_id: String, folder: String) -> js_sys::Promise {
+        promise!(self, |core| core.set_folder(&note_id, &folder).await.map(|()| JsValue::UNDEFINED))
+    }
+
+    /// Encrypts `data` and adds it to the note as an attachment block.
+    #[wasm_bindgen(js_name = addAttachment)]
+    pub fn add_attachment(
+        &self,
+        note_id: String,
+        after: Option<String>,
+        name: String,
+        mime: String,
+        data: Vec<u8>,
+    ) -> js_sys::Promise {
+        promise!(self, |core| core
+            .add_attachment(&note_id, after.as_deref(), &name, &mime, &data)
+            .await
+            .map(|block| json(&block)))
+    }
+
+    /// The decrypted file of an attachment block, as a `Uint8Array`.
+    pub fn attachment(&self, block_id: String) -> js_sys::Promise {
+        promise!(self, |core| core
+            .attachment(&block_id)
+            .await
+            .map(|bytes| JsValue::from(Uint8Array::from(bytes.as_slice()))))
     }
 
     #[wasm_bindgen(js_name = setTitle)]

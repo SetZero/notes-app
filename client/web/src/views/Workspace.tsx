@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { EditorViewModel } from "../viewmodels/EditorViewModel";
 import type { SyncState } from "../viewmodels/SyncController";
 import { useViewModel } from "../viewmodels/ViewModel";
 import type { WorkspaceViewModel } from "../viewmodels/WorkspaceViewModel";
@@ -30,11 +31,69 @@ function syncLabel(sync: SyncState): string {
   }
 }
 
+/** The bar above an open note: back, folder, attach, delete. */
+function NoteBar({ workspace, editor, folders }: { workspace: WorkspaceViewModel; editor: EditorViewModel; folders: string[] }) {
+  const state = useViewModel(editor);
+  const picker = useRef<HTMLInputElement>(null);
+  // Typed text is only a draft until the field is left or Enter is pressed.
+  const [folder, setFolder] = useState(state.folder);
+  useEffect(() => setFolder(state.folder), [state.folder]);
+
+  return (
+    <header>
+      <button className="back" onClick={() => void workspace.select(null)}>
+        ‹ Notes
+      </button>
+      <input
+        className="folder"
+        aria-label="Folder"
+        placeholder="No folder"
+        title="Folder of this note, for example Work/Plans"
+        list="folders"
+        value={folder}
+        onChange={(e) => setFolder(e.target.value)}
+        onBlur={() => editor.setFolder(folder)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+        }}
+      />
+      <datalist id="folders">
+        {folders.map((path) => (
+          <option key={path} value={path} />
+        ))}
+      </datalist>
+      <span className="spacer" />
+      <input
+        ref={picker}
+        type="file"
+        multiple
+        hidden
+        onChange={(e) => {
+          editor.attachFiles([...(e.target.files ?? [])], null);
+          e.target.value = "";
+        }}
+      />
+      <button onClick={() => picker.current?.click()} title="Images, audio, video or any other file. You can also paste or drop them into the note.">
+        Attach
+      </button>
+      <button
+        className="danger"
+        onClick={() => {
+          if (window.confirm("Delete this note on all your devices?")) void workspace.deleteSelected();
+        }}
+      >
+        Delete note
+      </button>
+    </header>
+  );
+}
+
 export function Workspace({ workspace }: { workspace: WorkspaceViewModel }) {
   const state = useViewModel(workspace);
   const sync = useViewModel(workspace.sync);
   const [menuOpen, setMenuOpen] = useState(false);
   const notes = workspace.visibleNotes;
+  const folders = workspace.folders;
 
   const choose = (dialog: "devices" | "recovery" | "sign-out") => {
     setMenuOpen(false);
@@ -92,6 +151,27 @@ export function Workspace({ workspace }: { workspace: WorkspaceViewModel }) {
           </p>
         )}
 
+        {folders.length > 0 && (
+          <ul className="folders" aria-label="Folders">
+            <li>
+              <button aria-current={state.folder === null} onClick={() => workspace.showFolder(null)}>
+                All notes
+              </button>
+            </li>
+            {folders.map((path) => (
+              <li key={path}>
+                <button
+                  aria-current={state.folder === path}
+                  className={`depth-${Math.min(path.split("/").length - 1, 4)}`}
+                  onClick={() => workspace.showFolder(path)}
+                >
+                  {path.split("/").at(-1)}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
         <ul className="notes">
           {notes.map((note) => (
             <li key={note.note_id}>
@@ -110,20 +190,7 @@ export function Workspace({ workspace }: { workspace: WorkspaceViewModel }) {
       <section className="pane">
         {state.editor ? (
           <>
-            <header>
-              <button className="back" onClick={() => void workspace.select(null)}>
-                ‹ Notes
-              </button>
-              <span className="spacer" />
-              <button
-                className="danger"
-                onClick={() => {
-                  if (window.confirm("Delete this note on all your devices?")) void workspace.deleteSelected();
-                }}
-              >
-                Delete note
-              </button>
-            </header>
+            <NoteBar key={`bar-${state.editor.state.noteId}`} workspace={workspace} editor={state.editor} folders={folders} />
             <Editor key={state.editor.state.noteId} editor={state.editor} />
           </>
         ) : (

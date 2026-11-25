@@ -18,7 +18,10 @@ pub struct Hlc {
 }
 
 pub fn is_version(text: &str) -> bool {
-    text.len() == VERSION_LEN && text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    text.len() == VERSION_LEN
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Milliseconds and counter of a version; `None` if it is not well formed.
@@ -89,7 +92,10 @@ mod tests {
 
     #[test]
     fn the_counter_rolls_over_into_the_time() {
-        let mut clock = Hlc { ms: 10, counter: u16::MAX };
+        let mut clock = Hlc {
+            ms: 10,
+            counter: u16::MAX,
+        };
         let v = clock.next(10, 0);
         assert_eq!(parse(&v), Some(Hlc { ms: 11, counter: 0 }));
     }

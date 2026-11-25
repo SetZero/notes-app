@@ -134,7 +134,7 @@ async fn two_devices_share_notes_and_the_server_sees_only_ciphertext() {
     let kit = laptop.core.create_account(SERVER, INVITE, "laptop").await.unwrap();
     assert_eq!(kit.phrase.split(' ').count(), 24);
 
-    let note = laptop.core.create_note().await.unwrap();
+    let note = laptop.core.create_note("").await.unwrap();
     laptop.core.set_title(&note.note_id, "Shopping list for Saturday").await.unwrap();
     let first = &note.blocks[0];
     laptop.core.update_block(&first.block_id, "todo", "sourdough bread", BTreeMap::new()).await.unwrap();
@@ -216,7 +216,7 @@ async fn the_later_edit_of_a_block_wins_and_other_blocks_merge() {
     let app = app().await;
     let a = device(&app).await;
     let kit = a.core.create_account(SERVER, INVITE, "a").await.unwrap();
-    let note = a.core.create_note().await.unwrap();
+    let note = a.core.create_note("").await.unwrap();
     let shared = note.blocks[0].block_id.clone();
     a.core.update_block(&shared, "paragraph", "original", BTreeMap::new()).await.unwrap();
     a.core.sync().await.unwrap();
@@ -253,7 +253,7 @@ async fn state_survives_a_restart_and_unsent_changes_are_sent_later() {
     let app = app().await;
     let first_run = device(&app).await;
     first_run.core.create_account(SERVER, INVITE, "laptop").await.unwrap();
-    let note = first_run.core.create_note().await.unwrap();
+    let note = first_run.core.create_note("").await.unwrap();
     first_run.core.set_title(&note.note_id, "written before the restart").await.unwrap();
     first_run.core.sync().await.unwrap();
     first_run.online.set(false);
@@ -276,7 +276,7 @@ async fn state_survives_a_restart_and_unsent_changes_are_sent_later() {
     second_run.core.sign_out(true).await.unwrap();
     assert!(second_run.disk.files.borrow().is_empty() && second_run.disk.secrets.borrow().is_empty());
     assert!(!second_run.core.status().signed_in);
-    assert_eq!(second_run.core.create_note().await.err().unwrap().code, "not_signed_in");
+    assert_eq!(second_run.core.create_note("").await.err().unwrap().code, "not_signed_in");
 }
 
 #[tokio::test]
@@ -284,7 +284,7 @@ async fn a_tampering_server_or_disk_is_detected() {
     let app = app().await;
     let a = device(&app).await;
     let kit = a.core.create_account(SERVER, INVITE, "a").await.unwrap();
-    let note = a.core.create_note().await.unwrap();
+    let note = a.core.create_note("").await.unwrap();
     a.core.update_block(&note.blocks[0].block_id, "paragraph", "the real text", BTreeMap::new()).await.unwrap();
     a.core.sync().await.unwrap();
 
@@ -337,9 +337,9 @@ async fn a_device_that_was_away_too_long_resyncs_from_scratch() {
     let app = app().await;
     let a = device(&app).await;
     let kit = a.core.create_account(SERVER, INVITE, "a").await.unwrap();
-    let keep = a.core.create_note().await.unwrap();
+    let keep = a.core.create_note("").await.unwrap();
     a.core.set_title(&keep.note_id, "stays").await.unwrap();
-    let gone = a.core.create_note().await.unwrap();
+    let gone = a.core.create_note("").await.unwrap();
     a.core.set_title(&gone.note_id, "will be deleted").await.unwrap();
     a.core.sync().await.unwrap();
 
@@ -347,7 +347,7 @@ async fn a_device_that_was_away_too_long_resyncs_from_scratch() {
     sleeper.core.recover(SERVER, &kit.account_id, &kit.phrase, "sleeper").await.unwrap();
     sleeper.core.sync().await.unwrap();
     assert_eq!(sleeper.core.list_notes().len(), 2);
-    let unsent = sleeper.core.create_note().await.unwrap();
+    let unsent = sleeper.core.create_note("").await.unwrap();
     sleeper.core.set_title(&unsent.note_id, "written while away").await.unwrap();
     sleeper.online.set(false);
 
@@ -371,4 +371,107 @@ async fn a_device_that_was_away_too_long_resyncs_from_scratch() {
     assert!(titles.contains(&"stays".to_string()) && titles.contains(&"written while away".to_string()));
     a.core.sync().await.unwrap();
     assert_eq!(a.core.list_notes().len(), 2);
+}
+
+#[tokio::test]
+async fn attachments_travel_encrypted_and_are_checked_on_arrival() {
+    let app = app().await;
+    let a = device(&app).await;
+    let kit = a.create_account(SERVER, INVITE, "first").await.unwrap();
+    let note = a.create_note("").await.unwrap();
+    // Larger than one chunk, so the chunking is exercised as well.
+    let file: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
+    let block = a.add_attachment(&note.note_id, None, " photo.png ", "Image/PNG", &file).await.unwrap();
+    assert_eq!(block.kind, "attachment");
+    assert_eq!(block.text, "photo.png");
+    assert_eq!(block.attrs["mime"], "image/png");
+    assert_eq!(block.attrs["size"], "150000");
+    assert_eq!(a.attachment(&block.block_id).await.unwrap(), file);
+
+    // The file cannot be swapped under an existing attachment block.
+    let mut attrs = block.attrs.clone();
+    attrs.insert("hash".into(), "0".repeat(64));
+    assert_eq!(a.update_block(&block.block_id, "attachment", "x", attrs).await.err().unwrap().code, "input");
+    assert_eq!(a.insert_block(&note.note_id, None, "attachment", "x").await.err().unwrap().code, "input");
+    let big = vec![0u8; notes_core::MAX_ATTACHMENT_BYTES + 1];
+    assert_eq!(a.add_attachment(&note.note_id, None, "big", "x/y", &big).await.err().unwrap().code, "too_large");
+
+    a.sync().await.unwrap();
+    // On the server: one blob, and nothing of the file in the clear.
+    let blobs: Vec<_> = walk(&app.state.config.server.data_dir.join("blobs")).into_iter().collect();
+    assert_eq!(blobs.len(), 1);
+    let stored = std::fs::read(&blobs[0]).unwrap();
+    assert!(stored.len() > file.len());
+    assert!(!stored.windows(64).any(|w| w == &file[..64]));
+
+    let b = device(&app).await;
+    b.recover(SERVER, &kit.account_id, &kit.phrase, "second").await.unwrap();
+    b.sync().await.unwrap();
+    let seen = b.get_note(&note.note_id).unwrap();
+    assert_eq!(seen.blocks[0].block_id, block.block_id);
+    assert_eq!(b.attachment(&block.block_id).await.unwrap(), file);
+    // The second read comes from the device's own (encrypted) copy.
+    b.platform().online.set(false);
+    assert_eq!(b.attachment(&block.block_id).await.unwrap(), file);
+    b.platform().online.set(true);
+
+    // A server that changes the blob is caught by a device that has no copy.
+    let mut damaged = stored.clone();
+    damaged[1000] ^= 1;
+    std::fs::write(&blobs[0], &damaged).unwrap();
+    let c = device(&app).await;
+    c.recover(SERVER, &kit.account_id, &kit.phrase, "third").await.unwrap();
+    c.sync().await.unwrap();
+    assert_eq!(c.attachment(&block.block_id).await.err().unwrap().code, "corrupt");
+    std::fs::write(&blobs[0], &stored).unwrap();
+    assert_eq!(c.attachment(&block.block_id).await.unwrap(), file);
+
+    // Deleting the block removes the local copy on every device.
+    a.delete_block(&block.block_id).await.unwrap();
+    a.sync().await.unwrap();
+    b.sync().await.unwrap();
+    for device in [&a, &b] {
+        assert!(device.platform().disk.files.borrow().keys().all(|name| !name.starts_with("blob/")));
+        assert_eq!(device.attachment(&block.block_id).await.err().unwrap().code, "not_found");
+    }
+}
+
+#[tokio::test]
+async fn folders_are_part_of_the_note_and_sync_with_it() {
+    let app = app().await;
+    let a = device(&app).await;
+    let kit = a.create_account(SERVER, INVITE, "first").await.unwrap();
+    let note = a.create_note("  Work // Plans/ ").await.unwrap();
+    assert_eq!(note.folder, "Work/Plans");
+    let loose = a.create_note("").await.unwrap();
+    a.set_title(&note.note_id, "Roadmap").await.unwrap();
+    a.sync().await.unwrap();
+
+    let b = device(&app).await;
+    b.recover(SERVER, &kit.account_id, &kit.phrase, "second").await.unwrap();
+    b.sync().await.unwrap();
+    let folder_of = |device: &Device<'_>, id: &str| {
+        device.list_notes().into_iter().find(|n| n.note_id == id).unwrap().folder
+    };
+    assert_eq!(folder_of(&b, &note.note_id), "Work/Plans");
+    assert_eq!(folder_of(&b, &loose.note_id), "");
+
+    // Moving keeps the title; taking a note out of its folder works too.
+    b.set_folder(&note.note_id, "Archive").await.unwrap();
+    b.set_folder(&loose.note_id, "Work").await.unwrap();
+    b.sync().await.unwrap();
+    a.sync().await.unwrap();
+    assert_eq!(folder_of(&a, &note.note_id), "Archive");
+    assert_eq!(a.get_note(&note.note_id).unwrap().title, "Roadmap");
+    assert_eq!(folder_of(&a, &loose.note_id), "Work");
+    a.set_folder(&loose.note_id, " / ").await.unwrap();
+    assert_eq!(folder_of(&a, &loose.note_id), "");
+    assert_eq!(a.set_folder(&loose.note_id, &"x".repeat(300)).await.err().unwrap().code, "input");
+}
+
+impl<'a> std::ops::Deref for Device<'a> {
+    type Target = Core<TestPlatform<'a>>;
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
 }

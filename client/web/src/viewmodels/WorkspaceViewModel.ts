@@ -10,6 +10,8 @@ export type Dialog = "devices" | "recovery" | "sign-out" | null;
 export interface WorkspaceState {
   notes: NoteSummary[];
   query: string;
+  /** The folder whose notes are listed; `null` lists all notes. */
+  folder: string | null;
   selectedId: string | null;
   /** The editor of the selected note. Replaced when another note is opened. */
   editor: EditorViewModel | null;
@@ -31,6 +33,7 @@ export class WorkspaceViewModel extends ViewModel<WorkspaceState> {
     super({
       notes: notes.listNotes(),
       query: "",
+      folder: null,
       selectedId: null,
       editor: null,
       dialog: null,
@@ -55,11 +58,32 @@ export class WorkspaceViewModel extends ViewModel<WorkspaceState> {
 
   // ---------------------------------------------------------------- notes
 
-  /** The notes matching the search box. */
+  /** The notes in the chosen folder (and its subfolders) matching the search box. */
   public get visibleNotes(): NoteSummary[] {
     const query = this.state.query.trim().toLowerCase();
-    if (!query) return this.state.notes;
-    return this.state.notes.filter((n) => n.title.toLowerCase().includes(query) || n.preview.toLowerCase().includes(query));
+    const folder = this.state.folder;
+    return this.state.notes.filter(
+      (n) =>
+        (folder === null || n.folder === folder || n.folder.startsWith(`${folder}/`)) &&
+        (!query || n.title.toLowerCase().includes(query) || n.preview.toLowerCase().includes(query)),
+    );
+  }
+
+  /**
+   * Every folder that has a note in it or below it, sorted so that a folder
+   * comes right before its subfolders. Folders are not stored on their own.
+   */
+  public get folders(): string[] {
+    const all = new Set<string>();
+    for (const note of this.state.notes) {
+      const parts = note.folder ? note.folder.split("/") : [];
+      for (let depth = 1; depth <= parts.length; depth += 1) all.add(parts.slice(0, depth).join("/"));
+    }
+    return [...all].sort((a, b) => a.localeCompare(b));
+  }
+
+  public showFolder(folder: string | null): void {
+    this.setState({ folder });
   }
 
   public setQuery(query: string): void {
@@ -78,7 +102,7 @@ export class WorkspaceViewModel extends ViewModel<WorkspaceState> {
 
   public async createNote(): Promise<void> {
     try {
-      const note = await this.notes.createNote();
+      const note = await this.notes.createNote(this.state.folder ?? "");
       this.setState({ query: "" });
       this.afterLocalChange();
       await this.select(note.note_id);
@@ -101,12 +125,20 @@ export class WorkspaceViewModel extends ViewModel<WorkspaceState> {
   }
 
   private afterLocalChange(): void {
-    this.setState({ notes: this.notes.listNotes() });
+    this.refreshNotes();
     this.sync.noteLocalChange();
   }
 
+  private refreshNotes(): void {
+    const notes = this.notes.listNotes();
+    // A folder disappears with its last note; do not keep showing it empty.
+    const folder = this.state.folder;
+    const exists = folder === null || notes.some((n) => n.folder === folder || n.folder.startsWith(`${folder}/`));
+    this.setState({ notes, folder: exists ? folder : null });
+  }
+
   private applyRemoteChanges(report: SyncReport): void {
-    this.setState({ notes: this.notes.listNotes() });
+    this.refreshNotes();
     const selected = this.state.selectedId;
     if (selected && (report.changed_notes.includes(selected) || report.full_resync)) this.state.editor?.reload();
   }

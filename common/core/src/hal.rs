@@ -26,7 +26,10 @@ pub struct HttpResponse {
 
 impl HttpResponse {
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+        self.headers
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -71,6 +74,12 @@ pub trait Entropy {
 }
 
 /// All six ports together: what the core needs from a platform.
-pub trait Platform: HttpTransport + FileStore + SecureStore + TimeSource + NetworkMonitor + Entropy {}
+pub trait Platform:
+    HttpTransport + FileStore + SecureStore + TimeSource + NetworkMonitor + Entropy
+{
+}
 
-impl<T> Platform for T where T: HttpTransport + FileStore + SecureStore + TimeSource + NetworkMonitor + Entropy {}
+impl<T> Platform for T where
+    T: HttpTransport + FileStore + SecureStore + TimeSource + NetworkMonitor + Entropy
+{
+}

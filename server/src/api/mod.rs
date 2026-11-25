@@ -181,8 +181,14 @@ async fn not_found() -> ApiError {
 /// policy allows nothing but its own files: no inline or remote scripts, no
 /// remote styles, images or connections, no framing, no DOM injection sinks.
 /// `wasm-unsafe-eval` permits compiling the app's own WebAssembly module and
-/// nothing else.
-const WEB_APP_CSP: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval';     style-src 'self'; img-src 'self'; connect-src 'self'; manifest-src 'self';     base-uri 'none'; form-action 'none'; frame-ancestors 'none';     require-trusted-types-for 'script'; trusted-types 'none'";
+/// nothing else. `blob:` is for attachments, which the app decrypts in memory
+/// and shows as images, audio or video only (never as documents or scripts).
+const WEB_APP_CSP: &str = concat!(
+    "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; ",
+    "img-src 'self' blob:; media-src blob:; connect-src 'self'; manifest-src 'self'; ",
+    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'; ",
+    "require-trusted-types-for 'script'; trusted-types 'none'",
+);
 
 /// The API returns data, never documents: it may load and run nothing.
 const API_CSP: &str = "default-src 'none'; frame-ancestors 'none'";

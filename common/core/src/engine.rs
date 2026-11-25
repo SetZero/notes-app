@@ -5,7 +5,9 @@
 //! * `SecureStore`: the session (account key, device token, ids).
 //! * `FileStore`: one blob per block holding the same encrypted envelope the
 //!   server gets, plus a "still has to be uploaded" flag. Note text is never
-//!   written to storage in the clear.
+//!   written to storage in the clear. Attachments are kept the same way: the
+//!   encrypted blob as the server has it, plus a marker while it still has to
+//!   be uploaded.
 //! * memory: the decrypted blocks, while the app runs.
 
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -31,11 +33,27 @@ const MAX_ATTRS_BYTES: usize = 2 * 1024;
 const PUSH_BATCH_BLOCKS: usize = 100;
 const PUSH_BATCH_BYTES: usize = 512 * 1024;
 const PULL_LIMIT: usize = 100;
-const KINDS: [&str; 6] = ["header", "paragraph", "heading", "todo", "code", "attachment"];
+const KINDS: [&str; 6] = [
+    "header",
+    "paragraph",
+    "heading",
+    "todo",
+    "code",
+    "attachment",
+];
 
 const SESSION_SECRET: &str = "session";
 const META_FILE: &str = "meta";
 const BLOCK_PREFIX: &str = "block/";
+const BLOB_PREFIX: &str = "blob/";
+const UPLOAD_PREFIX: &str = "upload/";
+
+/// Largest attachment. Encrypted it stays below the server's default limit
+/// of 25 MiB per blob.
+pub const MAX_ATTACHMENT_BYTES: usize = 24 * 1024 * 1024;
+const MAX_NAME_CHARS: usize = 255;
+const MAX_FOLDER_BYTES: usize = 200;
+const FALLBACK_MIME: &str = "application/octet-stream";
 
 /// `code` is stable and meant for the user interface to switch on; `message`
 /// is for logs and as a fallback text.
@@ -49,7 +67,11 @@ pub struct CoreError {
 
 impl CoreError {
     fn new(code: &str, message: impl Into<String>) -> Self {
-        Self { code: code.into(), message: message.into(), retry_after: None }
+        Self {
+            code: code.into(),
+            message: message.into(),
+            retry_after: None,
+        }
     }
     fn input(message: &str) -> Self {
         Self::new("input", message)
@@ -91,6 +113,9 @@ pub struct RecoveryKit {
 pub struct NoteSummary {
     pub note_id: String,
     pub title: String,
+    /// Path of the folder the note is in, parts separated by "/". Empty for
+    /// a note outside of all folders.
+    pub folder: String,
     pub preview: String,
     pub updated_ms: i64,
 }
@@ -107,6 +132,7 @@ pub struct BlockView {
 pub struct NoteView {
     pub note_id: String,
     pub title: String,
+    pub folder: String,
     pub updated_ms: i64,
     pub blocks: Vec<BlockView>,
 }
@@ -297,10 +323,57 @@ fn decode(key: &AccountKey, envelope: &Envelope) -> core::result::Result<Option<
     note_key.zeroize();
     let plaintext = plaintext.ok_or(())?;
     if envelope.deleted {
-        return if plaintext.is_empty() { Ok(None) } else { Err(()) };
+        return if plaintext.is_empty() {
+            Ok(None)
+        } else {
+            Err(())
+        };
     }
     let payload: Payload = serde_json::from_slice(&plaintext).map_err(|_| ())?;
     Ok(Some(payload))
+}
+
+/// The blob an attachment block points to, if the block is well-formed.
+fn blob_hash(payload: Option<&Payload>) -> Option<&str> {
+    let payload = payload.filter(|p| p.kind == "attachment")?;
+    let hash = payload.attrs.get("hash")?;
+    let hex = hash.len() == 64
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    hex.then_some(hash.as_str())
+}
+
+fn blob_file(hash: &str) -> String {
+    format!("{BLOB_PREFIX}{hash}")
+}
+
+fn upload_file(hash: &str) -> String {
+    format!("{UPLOAD_PREFIX}{hash}")
+}
+
+/// "  Work //Plans/ " becomes "Work/Plans".
+fn normalize_folder(folder: &str) -> Result<String> {
+    let parts: Vec<&str> = folder
+        .split('/')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    let folder = parts.join("/");
+    if folder.len() > MAX_FOLDER_BYTES || folder.chars().any(char::is_control) {
+        return Err(CoreError::input(
+            "the folder name is too long or has control characters",
+        ));
+    }
+    Ok(folder)
+}
+
+fn folder_of(header: Option<&Block>) -> String {
+    header
+        .and_then(|h| h.payload.as_ref())
+        .and_then(|p| p.attrs.get("folder"))
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn block_file(block_id: &str) -> String {
@@ -308,8 +381,11 @@ fn block_file(block_id: &str) -> String {
 }
 
 fn stored_bytes(block: &Block) -> Result<Vec<u8>> {
-    serde_json::to_vec(&StoredBlock { envelope: block.envelope.clone(), dirty: block.dirty })
-        .map_err(|e| CoreError::new("storage", e.to_string()))
+    serde_json::to_vec(&StoredBlock {
+        envelope: block.envelope.clone(),
+        dirty: block.dirty,
+    })
+    .map_err(|e| CoreError::new("storage", e.to_string()))
 }
 
 fn version_ms(version: &str) -> i64 {
@@ -319,12 +395,19 @@ fn version_ms(version: &str) -> i64 {
 /// `https://…` always; plain `http://` only for this machine, for development.
 fn normalize_server_url(url: &str) -> Result<String> {
     let url = url.trim().trim_end_matches('/');
-    let local = ["http://localhost", "http://127.0.0.1", "http://[::1]"].iter().any(|prefix| {
-        url.strip_prefix(prefix).is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
-    });
-    let secure = url.strip_prefix("https://").is_some_and(|rest| !rest.is_empty());
+    let local = ["http://localhost", "http://127.0.0.1", "http://[::1]"]
+        .iter()
+        .any(|prefix| {
+            url.strip_prefix(prefix)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+        });
+    let secure = url
+        .strip_prefix("https://")
+        .is_some_and(|rest| !rest.is_empty());
     if !(secure || local) || url.contains(['?', '#', ' ']) {
-        return Err(CoreError::input("the server address must start with https://"));
+        return Err(CoreError::input(
+            "the server address must start with https://",
+        ));
     }
     Ok(url.to_string())
 }
@@ -332,7 +415,9 @@ fn normalize_server_url(url: &str) -> Result<String> {
 fn check_device_name(name: &str) -> Result<&str> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 64 {
-        return Err(CoreError::input("the device name must have 1 to 64 characters"));
+        return Err(CoreError::input(
+            "the device name must have 1 to 64 characters",
+        ));
     }
     Ok(name)
 }
@@ -340,31 +425,68 @@ fn check_device_name(name: &str) -> Result<&str> {
 impl<P: Platform> Core<P> {
     /// Loads the session and all blocks from storage.
     pub async fn open(platform: P) -> Result<Self> {
-        let mut state = State { session: None, blocks: BTreeMap::new(), cursor: 0, clock: Hlc { ms: 0, counter: 0 } };
-        if let Some(mut raw) = platform.secret_get(SESSION_SECRET).await.map_err(CoreError::storage)? {
+        let mut state = State {
+            session: None,
+            blocks: BTreeMap::new(),
+            cursor: 0,
+            clock: Hlc { ms: 0, counter: 0 },
+        };
+        if let Some(mut raw) = platform
+            .secret_get(SESSION_SECRET)
+            .await
+            .map_err(CoreError::storage)?
+        {
             let stored: core::result::Result<StoredSession, _> = serde_json::from_slice(&raw);
             raw.zeroize();
             // A session that cannot be read is treated as "not signed in".
             state.session = stored.ok().and_then(|s| Self::session_from_stored(&s));
         }
         if let Some(session) = &state.session {
-            if let Some(raw) = platform.file_read(META_FILE).await.map_err(CoreError::storage)? {
-                state.cursor = serde_json::from_slice::<Meta>(&raw).map(|m| m.cursor).unwrap_or(0);
+            if let Some(raw) = platform
+                .file_read(META_FILE)
+                .await
+                .map_err(CoreError::storage)?
+            {
+                state.cursor = serde_json::from_slice::<Meta>(&raw)
+                    .map(|m| m.cursor)
+                    .unwrap_or(0);
             }
-            for name in platform.file_list(BLOCK_PREFIX).await.map_err(CoreError::storage)? {
-                let Some(raw) = platform.file_read(&name).await.map_err(CoreError::storage)? else { continue };
-                let Ok(stored) = serde_json::from_slice::<StoredBlock>(&raw) else { continue };
+            for name in platform
+                .file_list(BLOCK_PREFIX)
+                .await
+                .map_err(CoreError::storage)?
+            {
+                let Some(raw) = platform
+                    .file_read(&name)
+                    .await
+                    .map_err(CoreError::storage)?
+                else {
+                    continue;
+                };
+                let Ok(stored) = serde_json::from_slice::<StoredBlock>(&raw) else {
+                    continue;
+                };
                 // Storage is not trusted either: a block that fails
                 // authentication is left out.
-                let Ok(payload) = decode(&session.key, &stored.envelope) else { continue };
+                let Ok(payload) = decode(&session.key, &stored.envelope) else {
+                    continue;
+                };
                 state.clock.observe(&stored.envelope.version);
                 state.blocks.insert(
                     stored.envelope.block_id.clone(),
-                    Block { envelope: stored.envelope, dirty: stored.dirty, payload },
+                    Block {
+                        envelope: stored.envelope,
+                        dirty: stored.dirty,
+                        payload,
+                    },
                 );
             }
         }
-        Ok(Self { platform, state: RefCell::new(state), syncing: Cell::new(false) })
+        Ok(Self {
+            platform,
+            state: RefCell::new(state),
+            syncing: Cell::new(false),
+        })
     }
 
     fn session_from_stored(stored: &StoredSession) -> Option<Session> {
@@ -409,13 +531,14 @@ impl<P: Platform> Core<P> {
 
     // ------------------------------------------------------------ transport
 
-    async fn call<B: Serialize>(
+    /// One request. Any answer from the server is `Ok`, whatever its status.
+    async fn send(
         &self,
         server_url: &str,
         method: &'static str,
         path: &str,
         token: Option<&str>,
-        body: Option<&B>,
+        body: Option<(&'static str, Vec<u8>)>,
     ) -> Result<HttpResponse> {
         if !self.platform.is_online() {
             return Err(CoreError::new("offline", "no network connection"));
@@ -425,47 +548,102 @@ impl<P: Platform> Core<P> {
         if let Some(token) = token {
             headers.push(("authorization", format!("Bearer {token}")));
         }
+        let body = body.map(|(content_type, bytes)| {
+            headers.push(("content-type", content_type.to_string()));
+            bytes
+        });
+        let request = HttpRequest {
+            method,
+            url: format!("{server_url}{path}"),
+            headers,
+            body,
+        };
+        self.platform
+            .send(request)
+            .await
+            .map_err(|e| CoreError::new("network", e.0))
+    }
+
+    /// The error a response with a status outside 2xx stands for.
+    fn failure(response: &HttpResponse) -> CoreError {
+        let problem: Problem = serde_json::from_slice(&response.body).unwrap_or(Problem {
+            code: String::new(),
+            detail: String::new(),
+        });
+        let code = if problem.code.is_empty() {
+            format!("http_{}", response.status)
+        } else {
+            problem.code
+        };
+        CoreError {
+            code,
+            message: if problem.detail.is_empty() {
+                format!("the server answered {}", response.status)
+            } else {
+                problem.detail
+            },
+            retry_after: response
+                .header("retry-after")
+                .and_then(|v| v.trim().parse().ok()),
+        }
+    }
+
+    /// A JSON request that must succeed.
+    async fn call<B: Serialize>(
+        &self,
+        server_url: &str,
+        method: &'static str,
+        path: &str,
+        token: Option<&str>,
+        body: Option<&B>,
+    ) -> Result<HttpResponse> {
         let body = match body {
-            Some(body) => {
-                headers.push(("content-type", "application/json".to_string()));
-                Some(serde_json::to_vec(body).map_err(|e| CoreError::new("protocol", e.to_string()))?)
-            }
+            Some(body) => Some((
+                "application/json",
+                serde_json::to_vec(body).map_err(|e| CoreError::new("protocol", e.to_string()))?,
+            )),
             None => None,
         };
-        let request = HttpRequest { method, url: format!("{server_url}{path}"), headers, body };
-        let response = self.platform.send(request).await.map_err(|e| CoreError::new("network", e.0))?;
+        let response = self.send(server_url, method, path, token, body).await?;
         if (200..300).contains(&response.status) {
-            return Ok(response);
+            Ok(response)
+        } else {
+            Err(Self::failure(&response))
         }
-        let problem: Problem =
-            serde_json::from_slice(&response.body).unwrap_or(Problem { code: String::new(), detail: String::new() });
-        let code = if problem.code.is_empty() { format!("http_{}", response.status) } else { problem.code };
-        Err(CoreError {
-            code,
-            message: if problem.detail.is_empty() { format!("the server answered {}", response.status) } else { problem.detail },
-            retry_after: response.header("retry-after").and_then(|v| v.trim().parse().ok()),
-        })
     }
 
     fn session_endpoint(&self) -> Result<(String, String)> {
         let state = self.state.borrow();
-        let session = state.session.as_ref().ok_or_else(CoreError::not_signed_in)?;
+        let session = state
+            .session
+            .as_ref()
+            .ok_or_else(CoreError::not_signed_in)?;
         Ok((session.server_url.clone(), session.token.clone()))
     }
 
     // -------------------------------------------------------------- account
 
     async fn check_server(&self, server_url: &str) -> Result<()> {
-        let response = self.call::<()>(server_url, "GET", "/v1/meta", None, None).await?;
-        let meta: MetaResponse =
-            serde_json::from_slice(&response.body).map_err(|_| CoreError::protocol("this is not a notes server"))?;
+        let response = self
+            .call::<()>(server_url, "GET", "/v1/meta", None, None)
+            .await?;
+        let meta: MetaResponse = serde_json::from_slice(&response.body)
+            .map_err(|_| CoreError::protocol("this is not a notes server"))?;
         if !meta.api_versions.iter().any(|v| v == "v1") {
-            return Err(CoreError::new("unsupported_server", "the server does not speak API version 1"));
+            return Err(CoreError::new(
+                "unsupported_server",
+                "the server does not speak API version 1",
+            ));
         }
         Ok(())
     }
 
-    async fn start_session(&self, server_url: String, credentials: Credentials, key: AccountKey) -> Result<()> {
+    async fn start_session(
+        &self,
+        server_url: String,
+        credentials: Credentials,
+        key: AccountKey,
+    ) -> Result<()> {
         let stored = StoredSession {
             server_url,
             account_id: credentials.account_id,
@@ -473,8 +651,10 @@ impl<P: Platform> Core<P> {
             token: credentials.token,
             account_key: B64.encode(key.0),
         };
-        let session = Self::session_from_stored(&stored).ok_or_else(|| CoreError::protocol("unusable ids from the server"))?;
-        let mut raw = serde_json::to_vec(&stored).map_err(|e| CoreError::new("storage", e.to_string()))?;
+        let session = Self::session_from_stored(&stored)
+            .ok_or_else(|| CoreError::protocol("unusable ids from the server"))?;
+        let mut raw =
+            serde_json::to_vec(&stored).map_err(|e| CoreError::new("storage", e.to_string()))?;
         let written = self.platform.secret_put(SESSION_SECRET, &raw).await;
         raw.zeroize();
         written.map_err(CoreError::storage)?;
@@ -489,7 +669,12 @@ impl<P: Platform> Core<P> {
 
     /// Creates a new account with this device as its first device. The
     /// returned recovery kit is the only backup of the account key.
-    pub async fn create_account(&self, server_url: &str, invite_code: &str, device_name: &str) -> Result<RecoveryKit> {
+    pub async fn create_account(
+        &self,
+        server_url: &str,
+        invite_code: &str,
+        device_name: &str,
+    ) -> Result<RecoveryKit> {
         if self.state.borrow().session.is_some() {
             return Err(CoreError::input("this device already has an account"));
         }
@@ -498,7 +683,9 @@ impl<P: Platform> Core<P> {
         self.check_server(&server_url).await?;
 
         let mut raw = [0u8; crypto::KEY_LEN];
-        self.platform.fill_random(&mut raw).map_err(|e| CoreError::new("entropy", e.0))?;
+        self.platform
+            .fill_random(&mut raw)
+            .map_err(|e| CoreError::new("entropy", e.0))?;
         let key = AccountKey(raw);
         raw.zeroize();
 
@@ -513,9 +700,11 @@ impl<P: Platform> Core<P> {
             device_name,
             recovery_verifier: B64.encode(crypto::recovery_verifier(&key)),
         };
-        let response = self.call(&server_url, "POST", "/v1/accounts", None, Some(&request)).await?;
-        let credentials: Credentials =
-            serde_json::from_slice(&response.body).map_err(|_| CoreError::protocol("unexpected answer from the server"))?;
+        let response = self
+            .call(&server_url, "POST", "/v1/accounts", None, Some(&request))
+            .await?;
+        let credentials: Credentials = serde_json::from_slice(&response.body)
+            .map_err(|_| CoreError::protocol("unexpected answer from the server"))?;
         let kit = RecoveryKit {
             server_url: server_url.clone(),
             account_id: credentials.account_id.clone(),
@@ -526,7 +715,13 @@ impl<P: Platform> Core<P> {
     }
 
     /// Adds this device to an existing account with the recovery phrase.
-    pub async fn recover(&self, server_url: &str, account_id: &str, phrase: &str, device_name: &str) -> Result<()> {
+    pub async fn recover(
+        &self,
+        server_url: &str,
+        account_id: &str,
+        phrase: &str,
+        device_name: &str,
+    ) -> Result<()> {
         if self.state.borrow().session.is_some() {
             return Err(CoreError::input("this device already has an account"));
         }
@@ -534,7 +729,10 @@ impl<P: Platform> Core<P> {
         let device_name = check_device_name(device_name)?;
         let account_id = account_id.trim().to_lowercase();
         if uuid_bytes(&account_id).is_none() {
-            return Err(CoreError::new("bad_account_id", "this is not an account id"));
+            return Err(CoreError::new(
+                "bad_account_id",
+                "this is not an account id",
+            ));
         }
         let key = crypto::account_key_from_phrase(phrase)
             .ok_or_else(|| CoreError::new("bad_phrase", "the recovery phrase is not valid"))?;
@@ -545,18 +743,26 @@ impl<P: Platform> Core<P> {
             device_name: &'a str,
             recovery_verifier: String,
         }
-        let request = Request { device_name, recovery_verifier: B64.encode(crypto::recovery_verifier(&key)) };
+        let request = Request {
+            device_name,
+            recovery_verifier: B64.encode(crypto::recovery_verifier(&key)),
+        };
         let path = format!("/v1/accounts/{account_id}/recover");
-        let response = self.call(&server_url, "POST", &path, None, Some(&request)).await?;
-        let credentials: Credentials =
-            serde_json::from_slice(&response.body).map_err(|_| CoreError::protocol("unexpected answer from the server"))?;
+        let response = self
+            .call(&server_url, "POST", &path, None, Some(&request))
+            .await?;
+        let credentials: Credentials = serde_json::from_slice(&response.body)
+            .map_err(|_| CoreError::protocol("unexpected answer from the server"))?;
         self.start_session(server_url, credentials, key).await
     }
 
     /// The recovery kit again, for a user who wants to write it down later.
     pub fn recovery_kit(&self) -> Result<RecoveryKit> {
         let state = self.state.borrow();
-        let session = state.session.as_ref().ok_or_else(CoreError::not_signed_in)?;
+        let session = state
+            .session
+            .as_ref()
+            .ok_or_else(CoreError::not_signed_in)?;
         Ok(RecoveryKit {
             server_url: session.server_url.clone(),
             account_id: session.account_id.clone(),
@@ -565,8 +771,16 @@ impl<P: Platform> Core<P> {
     }
 
     async fn wipe_files(&self) -> Result<()> {
-        for name in self.platform.file_list("").await.map_err(CoreError::storage)? {
-            self.platform.file_remove(&name).await.map_err(CoreError::storage)?;
+        for name in self
+            .platform
+            .file_list("")
+            .await
+            .map_err(CoreError::storage)?
+        {
+            self.platform
+                .file_remove(&name)
+                .await
+                .map_err(CoreError::storage)?;
         }
         Ok(())
     }
@@ -577,12 +791,23 @@ impl<P: Platform> Core<P> {
     pub async fn sign_out(&self, revoke: bool) -> Result<()> {
         if revoke {
             if let Ok((server_url, token)) = self.session_endpoint() {
-                let device_id = self.state.borrow().session.as_ref().map(|s| s.device_id.clone()).unwrap_or_default();
+                let device_id = self
+                    .state
+                    .borrow()
+                    .session
+                    .as_ref()
+                    .map(|s| s.device_id.clone())
+                    .unwrap_or_default();
                 let path = format!("/v1/devices/{device_id}");
-                let _ = self.call::<()>(&server_url, "DELETE", &path, Some(&token), None).await;
+                let _ = self
+                    .call::<()>(&server_url, "DELETE", &path, Some(&token), None)
+                    .await;
             }
         }
-        self.platform.secret_remove(SESSION_SECRET).await.map_err(CoreError::storage)?;
+        self.platform
+            .secret_remove(SESSION_SECRET)
+            .await
+            .map_err(CoreError::storage)?;
         {
             let mut state = self.state.borrow_mut();
             state.session = None;
@@ -597,12 +822,17 @@ impl<P: Platform> Core<P> {
     /// "call sync now" and carries no data.
     pub fn events_request(&self) -> Result<EventsRequest> {
         let (server_url, token) = self.session_endpoint()?;
-        Ok(EventsRequest { url: format!("{server_url}/v1/events"), authorization: format!("Bearer {token}") })
+        Ok(EventsRequest {
+            url: format!("{server_url}/v1/events"),
+            authorization: format!("Bearer {token}"),
+        })
     }
 
     pub async fn list_devices(&self) -> Result<Vec<DeviceInfo>> {
         let (server_url, token) = self.session_endpoint()?;
-        let response = self.call::<()>(&server_url, "GET", "/v1/devices", Some(&token), None).await?;
+        let response = self
+            .call::<()>(&server_url, "GET", "/v1/devices", Some(&token), None)
+            .await?;
         serde_json::from_slice::<DevicesResponse>(&response.body)
             .map(|r| r.devices)
             .map_err(|_| CoreError::protocol("unexpected answer from the server"))
@@ -614,32 +844,48 @@ impl<P: Platform> Core<P> {
         }
         let (server_url, token) = self.session_endpoint()?;
         let path = format!("/v1/devices/{device_id}");
-        self.call::<()>(&server_url, "DELETE", &path, Some(&token), None).await.map(|_| ())
+        self.call::<()>(&server_url, "DELETE", &path, Some(&token), None)
+            .await
+            .map(|_| ())
     }
 
     // ---------------------------------------------------------------- notes
 
     fn random_uuid(&self) -> Result<String> {
         let mut raw = [0u8; 16];
-        self.platform.fill_random(&mut raw).map_err(|e| CoreError::new("entropy", e.0))?;
+        self.platform
+            .fill_random(&mut raw)
+            .map_err(|e| CoreError::new("entropy", e.0))?;
         Ok(uuid_from_random(raw))
     }
 
     /// Encrypts a new version of a block, keeps it in memory and returns
     /// what has to be written to storage.
-    fn stage(&self, block_id: &str, note_id: &str, payload: Option<Payload>) -> Result<(String, Vec<u8>)> {
+    fn stage(
+        &self,
+        block_id: &str,
+        note_id: &str,
+        payload: Option<Payload>,
+    ) -> Result<(String, Vec<u8>)> {
         let block_bytes = uuid_bytes(block_id).ok_or_else(|| CoreError::input("not a block id"))?;
         let note_bytes = uuid_bytes(note_id).ok_or_else(|| CoreError::input("not a note id"))?;
         let mut nonce = [0u8; crypto::NONCE_LEN];
-        self.platform.fill_random(&mut nonce).map_err(|e| CoreError::new("entropy", e.0))?;
+        self.platform
+            .fill_random(&mut nonce)
+            .map_err(|e| CoreError::new("entropy", e.0))?;
         let now = self.platform.now_ms();
 
         let mut state = self.state.borrow_mut();
         let state = &mut *state;
-        let session = state.session.as_ref().ok_or_else(CoreError::not_signed_in)?;
+        let session = state
+            .session
+            .as_ref()
+            .ok_or_else(CoreError::not_signed_in)?;
         let version = state.clock.next(now, session.device_tag);
         let plaintext = match &payload {
-            Some(payload) => serde_json::to_vec(payload).map_err(|e| CoreError::new("storage", e.to_string()))?,
+            Some(payload) => {
+                serde_json::to_vec(payload).map_err(|e| CoreError::new("storage", e.to_string()))?
+            }
             None => Vec::new(),
         };
         let aad = crypto::aad(&block_bytes, &note_bytes, &version, payload.is_none());
@@ -663,9 +909,17 @@ impl<P: Platform> Core<P> {
         Ok((block_file(block_id), bytes))
     }
 
-    async fn write_block(&self, block_id: &str, note_id: &str, payload: Option<Payload>) -> Result<()> {
+    async fn write_block(
+        &self,
+        block_id: &str,
+        note_id: &str,
+        payload: Option<Payload>,
+    ) -> Result<()> {
         let (name, bytes) = self.stage(block_id, note_id, payload)?;
-        self.platform.file_write(&name, &bytes).await.map_err(CoreError::storage)
+        self.platform
+            .file_write(&name, &bytes)
+            .await
+            .map_err(CoreError::storage)
     }
 
     fn check_content(kind: &str, text: &str, attrs: &BTreeMap<String, String>) -> Result<()> {
@@ -673,7 +927,10 @@ impl<P: Platform> Core<P> {
             return Err(CoreError::input("unknown kind of block"));
         }
         if text.len() > MAX_BLOCK_TEXT_BYTES {
-            return Err(CoreError::new("too_long", "this block is too long; split it into several"));
+            return Err(CoreError::new(
+                "too_long",
+                "this block is too long; split it into several",
+            ));
         }
         if attrs.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>() > MAX_ATTRS_BYTES {
             return Err(CoreError::input("too many attributes"));
@@ -686,8 +943,14 @@ impl<P: Platform> Core<P> {
     fn note_blocks<'a>(state: &'a State, note_id: &str) -> (Option<&'a Block>, Vec<&'a Block>) {
         let mut header: Option<&Block> = None;
         let mut content = Vec::new();
-        for block in state.blocks.values().filter(|b| b.envelope.note_id == note_id) {
-            let Some(payload) = &block.payload else { continue };
+        for block in state
+            .blocks
+            .values()
+            .filter(|b| b.envelope.note_id == note_id)
+        {
+            let Some(payload) = &block.payload else {
+                continue;
+            };
             if payload.kind == "header" {
                 if header.is_none_or(|h| h.envelope.version < block.envelope.version) {
                     header = Some(block);
@@ -698,7 +961,8 @@ impl<P: Platform> Core<P> {
         }
         content.sort_by(|a, b| {
             let (pa, pb) = (a.payload.as_ref(), b.payload.as_ref());
-            (pa.map(|p| p.order.as_str()), &a.envelope.block_id).cmp(&(pb.map(|p| p.order.as_str()), &b.envelope.block_id))
+            (pa.map(|p| p.order.as_str()), &a.envelope.block_id)
+                .cmp(&(pb.map(|p| p.order.as_str()), &b.envelope.block_id))
         });
         (header, content)
     }
@@ -731,7 +995,10 @@ impl<P: Platform> Core<P> {
             .into_iter()
             .map(|note_id| {
                 let (header, content) = Self::note_blocks(&state, note_id);
-                let title = header.and_then(|h| h.payload.as_ref()).map(|p| p.text.clone()).unwrap_or_default();
+                let title = header
+                    .and_then(|h| h.payload.as_ref())
+                    .map(|p| p.text.clone())
+                    .unwrap_or_default();
                 let preview = content
                     .iter()
                     .filter_map(|b| b.payload.as_ref())
@@ -739,10 +1006,20 @@ impl<P: Platform> Core<P> {
                     .find(|text| !text.is_empty())
                     .map(|text| text.chars().take(140).collect())
                     .unwrap_or_default();
-                NoteSummary { note_id: note_id.to_string(), title, preview, updated_ms: updated.get(note_id).copied().unwrap_or(0) }
+                NoteSummary {
+                    note_id: note_id.to_string(),
+                    title,
+                    folder: folder_of(header),
+                    preview,
+                    updated_ms: updated.get(note_id).copied().unwrap_or(0),
+                }
             })
             .collect();
-        notes.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms).then_with(|| a.note_id.cmp(&b.note_id)));
+        notes.sort_by(|a, b| {
+            b.updated_ms
+                .cmp(&a.updated_ms)
+                .then_with(|| a.note_id.cmp(&b.note_id))
+        });
         notes
     }
 
@@ -761,17 +1038,34 @@ impl<P: Platform> Core<P> {
             .unwrap_or(0);
         Some(NoteView {
             note_id: note_id.to_string(),
-            title: header.and_then(|h| h.payload.as_ref()).map(|p| p.text.clone()).unwrap_or_default(),
+            title: header
+                .and_then(|h| h.payload.as_ref())
+                .map(|p| p.text.clone())
+                .unwrap_or_default(),
+            folder: folder_of(header),
             updated_ms,
             blocks: content.into_iter().filter_map(Self::view).collect(),
         })
     }
 
-    /// A new note with an empty title and one empty paragraph.
-    pub async fn create_note(&self) -> Result<NoteView> {
+    /// A new note with an empty title and one empty paragraph, in `folder`
+    /// ("" for none).
+    pub async fn create_note(&self, folder: &str) -> Result<NoteView> {
+        let folder = normalize_folder(folder)?;
         let note_id = self.random_uuid()?;
-        let header = Payload { schema: 1, kind: "header".into(), order: String::new(), text: String::new(), attrs: BTreeMap::new() };
-        self.write_block(&self.random_uuid()?, &note_id, Some(header)).await?;
+        let mut attrs = BTreeMap::new();
+        if !folder.is_empty() {
+            attrs.insert("folder".to_string(), folder);
+        }
+        let header = Payload {
+            schema: 1,
+            kind: "header".into(),
+            order: String::new(),
+            text: String::new(),
+            attrs,
+        };
+        self.write_block(&self.random_uuid()?, &note_id, Some(header))
+            .await?;
         let first = Payload {
             schema: 1,
             kind: "paragraph".into(),
@@ -779,49 +1073,115 @@ impl<P: Platform> Core<P> {
             text: String::new(),
             attrs: BTreeMap::new(),
         };
-        self.write_block(&self.random_uuid()?, &note_id, Some(first)).await?;
-        self.get_note(&note_id).ok_or_else(|| CoreError::new("storage", "the new note is missing"))
+        self.write_block(&self.random_uuid()?, &note_id, Some(first))
+            .await?;
+        self.get_note(&note_id)
+            .ok_or_else(|| CoreError::new("storage", "the new note is missing"))
     }
 
     pub async fn set_title(&self, note_id: &str, title: &str) -> Result<()> {
         Self::check_content("header", title, &BTreeMap::new())?;
+        self.edit_header(note_id, |payload| payload.text = title.to_string())
+            .await
+    }
+
+    /// Moves a note into a folder, given as a path like "Work/Plans". An
+    /// empty path takes it out of all folders. Folders exist as long as a
+    /// note is in them.
+    pub async fn set_folder(&self, note_id: &str, folder: &str) -> Result<()> {
+        let folder = normalize_folder(folder)?;
+        self.edit_header(note_id, |payload| {
+            if folder.is_empty() {
+                payload.attrs.remove("folder");
+            } else {
+                payload.attrs.insert("folder".to_string(), folder);
+            }
+        })
+        .await
+    }
+
+    /// Changes the header block of a note, creating it if another device
+    /// deleted it meanwhile. Nothing is written if nothing changed.
+    async fn edit_header(&self, note_id: &str, change: impl FnOnce(&mut Payload)) -> Result<()> {
         let existing = {
             let state = self.state.borrow();
             let (header, content) = Self::note_blocks(&state, note_id);
             if header.is_none() && content.is_empty() {
-                return Err(CoreError::new("not_found", "this note does not exist any more"));
+                return Err(CoreError::new(
+                    "not_found",
+                    "this note does not exist any more",
+                ));
             }
             header.map(|h| (h.envelope.block_id.clone(), h.payload.clone()))
         };
-        let (block_id, mut payload) = match existing {
-            Some((block_id, Some(payload))) => (block_id, payload),
+        let (block_id, before, is_new) = match existing {
+            Some((block_id, Some(payload))) => (block_id, payload, false),
             _ => (
                 self.random_uuid()?,
-                Payload { schema: 1, kind: "header".into(), order: String::new(), text: String::new(), attrs: BTreeMap::new() },
+                Payload {
+                    schema: 1,
+                    kind: "header".into(),
+                    order: String::new(),
+                    text: String::new(),
+                    attrs: BTreeMap::new(),
+                },
+                true,
             ),
         };
-        if payload.text == title {
+        let mut payload = before.clone();
+        change(&mut payload);
+        if payload == before && !is_new {
             return Ok(());
         }
-        payload.text = title.to_string();
         self.write_block(&block_id, note_id, Some(payload)).await
     }
 
     /// Adds a block after `after`, or at the top of the note without it.
-    pub async fn insert_block(&self, note_id: &str, after: Option<&str>, kind: &str, text: &str) -> Result<BlockView> {
-        Self::check_content(kind, text, &BTreeMap::new())?;
+    pub async fn insert_block(
+        &self,
+        note_id: &str,
+        after: Option<&str>,
+        kind: &str,
+        text: &str,
+    ) -> Result<BlockView> {
         if kind == "header" {
             return Err(CoreError::input("a note has one header"));
         }
+        if kind == "attachment" {
+            return Err(CoreError::input("attachments are added with their file"));
+        }
+        self.insert(note_id, after, kind, text, BTreeMap::new())
+            .await
+    }
+
+    async fn insert(
+        &self,
+        note_id: &str,
+        after: Option<&str>,
+        kind: &str,
+        text: &str,
+        attrs: BTreeMap<String, String>,
+    ) -> Result<BlockView> {
+        Self::check_content(kind, text, &attrs)?;
         let position = {
             let state = self.state.borrow();
             let (header, content) = Self::note_blocks(&state, note_id);
             if header.is_none() && content.is_empty() {
-                return Err(CoreError::new("not_found", "this note does not exist any more"));
+                return Err(CoreError::new(
+                    "not_found",
+                    "this note does not exist any more",
+                ));
             }
-            let orders: Vec<&str> = content.iter().filter_map(|b| b.payload.as_ref()).map(|p| p.order.as_str()).collect();
+            let orders: Vec<&str> = content
+                .iter()
+                .filter_map(|b| b.payload.as_ref())
+                .map(|p| p.order.as_str())
+                .collect();
             let index = match after {
-                Some(after) => content.iter().position(|b| b.envelope.block_id == after).map(|i| i + 1),
+                Some(after) => content
+                    .iter()
+                    .position(|b| b.envelope.block_id == after)
+                    .map(|i| i + 1),
                 None => Some(0),
             };
             // The block to insert after is gone (deleted on another device):
@@ -831,25 +1191,54 @@ impl<P: Platform> Core<P> {
             order::between(low, orders.get(index).copied())
         };
         let block_id = self.random_uuid()?;
-        let payload = Payload { schema: 1, kind: kind.to_string(), order: position, text: text.to_string(), attrs: BTreeMap::new() };
-        self.write_block(&block_id, note_id, Some(payload.clone())).await?;
-        Ok(BlockView { block_id, kind: payload.kind, text: payload.text, attrs: payload.attrs })
+        let payload = Payload {
+            schema: 1,
+            kind: kind.to_string(),
+            order: position,
+            text: text.to_string(),
+            attrs,
+        };
+        self.write_block(&block_id, note_id, Some(payload.clone()))
+            .await?;
+        Ok(BlockView {
+            block_id,
+            kind: payload.kind,
+            text: payload.text,
+            attrs: payload.attrs,
+        })
     }
 
     /// Changes kind, text and attributes of a block. Nothing is written if
     /// nothing changed.
-    pub async fn update_block(&self, block_id: &str, kind: &str, text: &str, attrs: BTreeMap<String, String>) -> Result<()> {
+    pub async fn update_block(
+        &self,
+        block_id: &str,
+        kind: &str,
+        text: &str,
+        attrs: BTreeMap<String, String>,
+    ) -> Result<()> {
         Self::check_content(kind, text, &attrs)?;
         let (note_id, mut payload) = {
             let state = self.state.borrow();
             let block = state.blocks.get(block_id);
             match block.and_then(|b| b.payload.clone().map(|p| (b.envelope.note_id.clone(), p))) {
                 Some(found) => found,
-                None => return Err(CoreError::new("not_found", "this block does not exist any more")),
+                None => {
+                    return Err(CoreError::new(
+                        "not_found",
+                        "this block does not exist any more",
+                    ))
+                }
             }
         };
         if (payload.kind == "header") != (kind == "header") {
             return Err(CoreError::input("a header stays a header"));
+        }
+        // An attachment keeps its file; only its name (the text) can change.
+        if (payload.kind == "attachment" || kind == "attachment")
+            && (payload.kind != kind || payload.attrs != attrs)
+        {
+            return Err(CoreError::input("an attachment stays an attachment"));
         }
         if payload.kind == kind && payload.text == text && payload.attrs == attrs {
             return Ok(());
@@ -861,28 +1250,259 @@ impl<P: Platform> Core<P> {
     }
 
     pub async fn delete_block(&self, block_id: &str) -> Result<()> {
-        let note_id = {
+        let (note_id, hash) = {
             let state = self.state.borrow();
             match state.blocks.get(block_id) {
-                Some(block) if block.payload.is_some() => block.envelope.note_id.clone(),
+                Some(block) if block.payload.is_some() => (
+                    block.envelope.note_id.clone(),
+                    blob_hash(block.payload.as_ref()).map(str::to_string),
+                ),
                 _ => return Ok(()),
             }
         };
-        self.write_block(block_id, &note_id, None).await
+        self.write_block(block_id, &note_id, None).await?;
+        self.forget_blobs(hash).await
     }
 
     pub async fn delete_note(&self, note_id: &str) -> Result<()> {
-        let block_ids: Vec<String> = {
+        let blocks: Vec<(String, Option<String>)> = {
             let state = self.state.borrow();
             state
                 .blocks
                 .values()
                 .filter(|b| b.envelope.note_id == note_id && b.payload.is_some())
-                .map(|b| b.envelope.block_id.clone())
+                .map(|b| {
+                    (
+                        b.envelope.block_id.clone(),
+                        blob_hash(b.payload.as_ref()).map(str::to_string),
+                    )
+                })
                 .collect()
         };
-        for block_id in block_ids {
+        for (block_id, hash) in blocks {
             self.write_block(&block_id, note_id, None).await?;
+            self.forget_blobs(hash).await?;
+        }
+        Ok(())
+    }
+
+    // ---------------------------------------------------------- attachments
+
+    /// Removes the local copies of blobs whose attachment block is gone.
+    async fn forget_blobs(&self, hashes: impl IntoIterator<Item = String>) -> Result<()> {
+        for hash in hashes {
+            self.platform
+                .file_remove(&upload_file(&hash))
+                .await
+                .map_err(CoreError::storage)?;
+            self.platform
+                .file_remove(&blob_file(&hash))
+                .await
+                .map_err(CoreError::storage)?;
+        }
+        Ok(())
+    }
+
+    /// Adds a file to a note, after the block `after` or at the top without
+    /// it. The file is encrypted here with a key of its own; the next sync
+    /// uploads it. `mime` decides how the app shows it (image, audio, video
+    /// or a plain download).
+    pub async fn add_attachment(
+        &self,
+        note_id: &str,
+        after: Option<&str>,
+        name: &str,
+        mime: &str,
+        data: &[u8],
+    ) -> Result<BlockView> {
+        if data.len() > MAX_ATTACHMENT_BYTES {
+            return Err(CoreError::new(
+                "too_large",
+                "this file is too large to attach",
+            ));
+        }
+        let name: String = name
+            .trim()
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(MAX_NAME_CHARS)
+            .collect();
+        let mime = mime.trim().to_ascii_lowercase();
+        let plain_mime = mime.len() <= 100
+            && mime.split('/').count() == 2
+            && mime
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"/.+-_".contains(&b));
+        let mime = if plain_mime {
+            mime
+        } else {
+            FALLBACK_MIME.to_string()
+        };
+
+        let mut key = [0u8; crypto::KEY_LEN];
+        let mut prefix = [0u8; crypto::BLOB_PREFIX_LEN];
+        self.platform
+            .fill_random(&mut key)
+            .map_err(|e| CoreError::new("entropy", e.0))?;
+        self.platform
+            .fill_random(&mut prefix)
+            .map_err(|e| CoreError::new("entropy", e.0))?;
+        let blob = crypto::seal_blob(&key, &prefix, data);
+        let hash = crypto::sha256_hex(&blob);
+        let mut attrs = BTreeMap::new();
+        attrs.insert("hash".to_string(), hash.clone());
+        attrs.insert("key".to_string(), B64.encode(key));
+        attrs.insert("size".to_string(), data.len().to_string());
+        attrs.insert("mime".to_string(), mime);
+        key.zeroize();
+
+        // The blob first: a block must never point to a file that is nowhere.
+        self.platform
+            .file_write(&blob_file(&hash), &blob)
+            .await
+            .map_err(CoreError::storage)?;
+        self.platform
+            .file_write(&upload_file(&hash), &[])
+            .await
+            .map_err(CoreError::storage)?;
+        match self
+            .insert(note_id, after, "attachment", &name, attrs)
+            .await
+        {
+            Ok(block) => Ok(block),
+            Err(error) => {
+                self.forget_blobs([hash]).await?;
+                Err(error)
+            }
+        }
+    }
+
+    /// The decrypted file of an attachment block. Fetched from the server the
+    /// first time and kept (encrypted) on this device afterwards.
+    pub async fn attachment(&self, block_id: &str) -> Result<Vec<u8>> {
+        let (hash, mut key) = {
+            let state = self.state.borrow();
+            let payload = state.blocks.get(block_id).and_then(|b| b.payload.as_ref());
+            let hash = blob_hash(payload)
+                .ok_or_else(|| CoreError::new("not_found", "this is not an attachment"))?;
+            let raw = payload
+                .and_then(|p| p.attrs.get("key"))
+                .and_then(|k| B64.decode(k).ok());
+            let key: [u8; crypto::KEY_LEN] = raw
+                .and_then(|k| k.as_slice().try_into().ok())
+                .ok_or_else(|| CoreError::new("corrupt", "the attachment has no usable key"))?;
+            (hash.to_string(), key)
+        };
+        let stored = self
+            .platform
+            .file_read(&blob_file(&hash))
+            .await
+            .map_err(CoreError::storage)?;
+        let blob = match stored {
+            Some(blob) => blob,
+            None => {
+                let (server_url, token) = self.session_endpoint()?;
+                let path = format!("/v1/blobs/{hash}");
+                let response = self
+                    .send(&server_url, "GET", &path, Some(&token), None)
+                    .await?;
+                if response.status == 404 {
+                    return Err(CoreError::new(
+                        "not_uploaded",
+                        "the device that added this file has not uploaded it yet",
+                    ));
+                }
+                if response.status != 200 {
+                    return Err(Self::failure(&response));
+                }
+                // The server is not trusted: only the bytes the block names.
+                if crypto::sha256_hex(&response.body) != hash {
+                    return Err(CoreError::new(
+                        "corrupt",
+                        "the server sent a different file",
+                    ));
+                }
+                self.platform
+                    .file_write(&blob_file(&hash), &response.body)
+                    .await
+                    .map_err(CoreError::storage)?;
+                response.body
+            }
+        };
+        let plain = crypto::open_blob(&key, &blob);
+        key.zeroize();
+        match plain {
+            Some(plain) => Ok(plain),
+            None => {
+                // A damaged local copy; the next attempt fetches it again.
+                self.platform
+                    .file_remove(&blob_file(&hash))
+                    .await
+                    .map_err(CoreError::storage)?;
+                Err(CoreError::new(
+                    "corrupt",
+                    "the attachment failed its integrity check",
+                ))
+            }
+        }
+    }
+
+    /// Uploads attachments added on this device. Runs before blocks are
+    /// pushed, so other devices never see a block whose file is missing.
+    async fn upload_blobs(
+        &self,
+        server_url: &str,
+        token: &str,
+        report: &mut SyncReport,
+    ) -> Result<()> {
+        for marker in self
+            .platform
+            .file_list(UPLOAD_PREFIX)
+            .await
+            .map_err(CoreError::storage)?
+        {
+            let Some(hash) = marker.strip_prefix(UPLOAD_PREFIX) else {
+                continue;
+            };
+            let path = format!("/v1/blobs/{hash}");
+            let exists = self
+                .send(server_url, "HEAD", &path, Some(token), None)
+                .await?;
+            let done = match exists.status {
+                200 => true,
+                404 => match self
+                    .platform
+                    .file_read(&blob_file(hash))
+                    .await
+                    .map_err(CoreError::storage)?
+                {
+                    // Deleted again before it was ever uploaded.
+                    None => true,
+                    Some(blob) => {
+                        let body = Some(("application/octet-stream", blob));
+                        let response = self
+                            .send(server_url, "PUT", &path, Some(token), body)
+                            .await?;
+                        match response.status {
+                            200 | 201 => true,
+                            // Too large for this server or the account's
+                            // space is used up: trying again will not help.
+                            413 => {
+                                report.rejected += 1;
+                                true
+                            }
+                            _ => return Err(Self::failure(&response)),
+                        }
+                    }
+                },
+                _ => return Err(Self::failure(&exists)),
+            };
+            if done {
+                self.platform
+                    .file_remove(&marker)
+                    .await
+                    .map_err(CoreError::storage)?;
+            }
         }
         Ok(())
     }
@@ -890,9 +1510,15 @@ impl<P: Platform> Core<P> {
     // ----------------------------------------------------------------- sync
 
     async fn save_meta(&self) -> Result<()> {
-        let meta = Meta { cursor: self.state.borrow().cursor };
-        let bytes = serde_json::to_vec(&meta).map_err(|e| CoreError::new("storage", e.to_string()))?;
-        self.platform.file_write(META_FILE, &bytes).await.map_err(CoreError::storage)
+        let meta = Meta {
+            cursor: self.state.borrow().cursor,
+        };
+        let bytes =
+            serde_json::to_vec(&meta).map_err(|e| CoreError::new("storage", e.to_string()))?;
+        self.platform
+            .file_write(META_FILE, &bytes)
+            .await
+            .map_err(CoreError::storage)
     }
 
     /// Uploads local changes, then downloads what other devices changed.
@@ -904,6 +1530,7 @@ impl<P: Platform> Core<P> {
         let _guard = SyncGuard(&self.syncing);
         let (server_url, token) = self.session_endpoint()?;
         let mut report = SyncReport::default();
+        self.upload_blobs(&server_url, &token, &mut report).await?;
         self.push(&server_url, &token, &mut report).await?;
         self.pull(&server_url, &token, &mut report).await?;
         Ok(report)
@@ -924,7 +1551,13 @@ impl<P: Platform> Core<P> {
                 state
                     .blocks
                     .values()
-                    .filter(|b| b.dirty && !offered.contains(&(b.envelope.block_id.clone(), b.envelope.version.clone())))
+                    .filter(|b| {
+                        b.dirty
+                            && !offered.contains(&(
+                                b.envelope.block_id.clone(),
+                                b.envelope.version.clone(),
+                            ))
+                    })
                     .take(PUSH_BATCH_BLOCKS)
                     .take_while(|b| {
                         bytes += b.envelope.ciphertext.len() + 256;
@@ -939,9 +1572,17 @@ impl<P: Platform> Core<P> {
             for envelope in &batch {
                 offered.insert((envelope.block_id.clone(), envelope.version.clone()));
             }
-            let response = self.call(server_url, "POST", "/v1/changes", Some(token), Some(&Request { changes: &batch })).await?;
-            let answer: PushResponse =
-                serde_json::from_slice(&response.body).map_err(|_| CoreError::protocol("unexpected answer to a push"))?;
+            let response = self
+                .call(
+                    server_url,
+                    "POST",
+                    "/v1/changes",
+                    Some(token),
+                    Some(&Request { changes: &batch }),
+                )
+                .await?;
+            let answer: PushResponse = serde_json::from_slice(&response.body)
+                .map_err(|_| CoreError::protocol("unexpected answer to a push"))?;
 
             let mut writes = Vec::new();
             {
@@ -980,7 +1621,10 @@ impl<P: Platform> Core<P> {
                 }
             }
             for (name, bytes) in writes {
-                self.platform.file_write(&name, &bytes).await.map_err(CoreError::storage)?;
+                self.platform
+                    .file_write(&name, &bytes)
+                    .await
+                    .map_err(CoreError::storage)?;
             }
         }
     }
@@ -992,7 +1636,10 @@ impl<P: Platform> Core<P> {
         loop {
             let cursor = self.state.borrow().cursor;
             let path = format!("/v1/changes?since={cursor}&limit={PULL_LIMIT}");
-            let response = match self.call::<()>(server_url, "GET", &path, Some(token), None).await {
+            let response = match self
+                .call::<()>(server_url, "GET", &path, Some(token), None)
+                .await
+            {
                 Ok(response) => response,
                 Err(error) if error.code == "cursor_expired" && seen.is_none() => {
                     // This device was away for so long that the server has
@@ -1004,17 +1651,20 @@ impl<P: Platform> Core<P> {
                 }
                 Err(error) => return Err(error),
             };
-            let page: PullResponse =
-                serde_json::from_slice(&response.body).map_err(|_| CoreError::protocol("unexpected answer to a pull"))?;
+            let page: PullResponse = serde_json::from_slice(&response.body)
+                .map_err(|_| CoreError::protocol("unexpected answer to a pull"))?;
             if page.next_cursor < cursor || (page.has_more && page.next_cursor == cursor) {
                 return Err(CoreError::protocol("the server's cursor does not advance"));
             }
 
             let mut writes = Vec::new();
+            let mut dropped_blobs = Vec::new();
             {
                 let mut state = self.state.borrow_mut();
                 let state = &mut *state;
-                let Some(session) = state.session.as_ref() else { return Err(CoreError::not_signed_in()) };
+                let Some(session) = state.session.as_ref() else {
+                    return Err(CoreError::not_signed_in());
+                };
                 for envelope in page.changes {
                     if let Some(seen) = seen.as_mut() {
                         seen.insert(envelope.block_id.clone());
@@ -1037,18 +1687,35 @@ impl<P: Platform> Core<P> {
                         }
                     };
                     if newer {
-                        let block = Block { envelope, dirty: false, payload };
+                        let block = Block {
+                            envelope,
+                            dirty: false,
+                            payload,
+                        };
                         writes.push((block_file(&block.envelope.block_id), stored_bytes(&block)?));
                         changed.insert(block.envelope.note_id.clone());
                         report.pulled += 1;
-                        state.blocks.insert(block.envelope.block_id.clone(), block);
+                        let new_hash = blob_hash(block.payload.as_ref()).map(str::to_string);
+                        if let Some(old) =
+                            state.blocks.insert(block.envelope.block_id.clone(), block)
+                        {
+                            if let Some(old_hash) = blob_hash(old.payload.as_ref()) {
+                                if new_hash.as_deref() != Some(old_hash) {
+                                    dropped_blobs.push(old_hash.to_string());
+                                }
+                            }
+                        }
                     }
                 }
                 state.cursor = page.next_cursor;
             }
             for (name, bytes) in writes {
-                self.platform.file_write(&name, &bytes).await.map_err(CoreError::storage)?;
+                self.platform
+                    .file_write(&name, &bytes)
+                    .await
+                    .map_err(CoreError::storage)?;
             }
+            self.forget_blobs(dropped_blobs).await?;
             self.save_meta().await?;
             if !page.has_more {
                 break;
@@ -1068,8 +1735,16 @@ impl<P: Platform> Core<P> {
                     .collect()
             };
             for (block_id, note_id) in gone {
-                self.state.borrow_mut().blocks.remove(&block_id);
-                self.platform.file_remove(&block_file(&block_id)).await.map_err(CoreError::storage)?;
+                let removed = self.state.borrow_mut().blocks.remove(&block_id);
+                let hash = removed
+                    .as_ref()
+                    .and_then(|b| blob_hash(b.payload.as_ref()))
+                    .map(str::to_string);
+                self.platform
+                    .file_remove(&block_file(&block_id))
+                    .await
+                    .map_err(CoreError::storage)?;
+                self.forget_blobs(hash).await?;
                 changed.insert(note_id);
             }
         }

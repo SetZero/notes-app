@@ -18,5 +18,6 @@ pub mod ids;
 pub mod order;
 
 pub use engine::{
-    BlockView, Core, CoreError, DeviceInfo, EventsRequest, NoteSummary, NoteView, RecoveryKit, Status, SyncReport, MAX_BLOCK_TEXT_BYTES,
+    BlockView, Core, CoreError, DeviceInfo, EventsRequest, NoteSummary, NoteView, RecoveryKit,
+    Status, SyncReport, MAX_ATTACHMENT_BYTES, MAX_BLOCK_TEXT_BYTES,
 };

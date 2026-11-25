@@ -16,9 +16,26 @@ export interface FocusRequest {
   sequence: number;
 }
 
+/** How an attachment is shown. Anything not known to be safe inline is a download. */
+export type MediaKind = "image" | "audio" | "video" | "file";
+
+/** The decrypted file of an attachment block, ready for the page to use. */
+export interface Media {
+  kind: MediaKind;
+  /** A blob: URL that lives as long as the note is open. */
+  url: string | null;
+  problem: string | null;
+}
+
 export interface EditorState {
   noteId: string;
   title: string;
+  /** Folder path like "Work/Plans"; empty for none. */
+  folder: string;
+  /** Decrypted attachments by block id, filled as the view asks for them. */
+  media: Record<string, Media>;
+  /** Files being encrypted and added right now. */
+  attaching: number;
   blocks: Block[];
   focus: FocusRequest | null;
   problem: string | null;
@@ -29,6 +46,34 @@ export interface EditorState {
 export class EditorViewModel extends ViewModel<EditorState> {
   private static readonly SAVE_DELAY_MS = 350;
   private static readonly TITLE = "title";
+  private static readonly MAX_ATTACHMENT_BYTES = 24 * 1024 * 1024;
+
+  /**
+   * Types the browser may render itself. Everything else, SVG and HTML in
+   * particular, is only ever offered as a download with a neutral type, so a
+   * file can never run as part of this page.
+   */
+  private static readonly INLINE: Record<string, MediaKind> = {
+    "image/png": "image",
+    "image/jpeg": "image",
+    "image/gif": "image",
+    "image/webp": "image",
+    "image/avif": "image",
+    "image/bmp": "image",
+    "audio/mpeg": "audio",
+    "audio/mp4": "audio",
+    "audio/x-m4a": "audio",
+    "audio/aac": "audio",
+    "audio/ogg": "audio",
+    "audio/wav": "audio",
+    "audio/x-wav": "audio",
+    "audio/webm": "audio",
+    "audio/flac": "audio",
+    "video/mp4": "video",
+    "video/webm": "video",
+    "video/ogg": "video",
+    "video/quicktime": "video",
+  };
 
   /** Pending saves, by block id (or "title"). */
   private readonly timers = new Map<string, number>();
@@ -46,6 +91,9 @@ export class EditorViewModel extends ViewModel<EditorState> {
     super({
       noteId,
       title: note?.title ?? "",
+      folder: note?.folder ?? "",
+      media: {},
+      attaching: 0,
       blocks: note?.blocks ?? [],
       focus: null,
       problem: null,
@@ -73,6 +121,18 @@ export class EditorViewModel extends ViewModel<EditorState> {
       this.replace({ ...block, text });
     }
     this.schedule(blockId);
+  }
+
+  /** Moves the note into a folder ("Work/Plans"), or out of all with "". */
+  public setFolder(folder: string): void {
+    const cleaned = folder
+      .split("/")
+      .map((part) => part.trim())
+      .filter((part) => part !== "")
+      .join("/");
+    if (cleaned === this.state.folder) return;
+    this.setState({ folder: cleaned });
+    this.enqueue(() => this.notes.setFolder(this.state.noteId, cleaned));
   }
 
   /** Markdown-style prefixes typed at the start of a paragraph. */
@@ -185,6 +245,74 @@ export class EditorViewModel extends ViewModel<EditorState> {
     });
   }
 
+  // -------------------------------------------------------- attachments
+
+  /**
+   * Adds files (pasted, dropped or picked) below the block `after`, or at
+   * the end of the note without it. Each file is encrypted on this device
+   * before anything is stored or sent.
+   */
+  public attachFiles(files: File[], after: string | null): void {
+    let previous = after ?? this.state.blocks.at(-1)?.block_id ?? null;
+    for (const file of files) {
+      if (file.size > EditorViewModel.MAX_ATTACHMENT_BYTES) {
+        this.setState({ problem: `"${file.name}" is larger than 24 MB and cannot be attached.` });
+        continue;
+      }
+      this.setState({ attaching: this.state.attaching + 1 });
+      this.enqueue(async () => {
+        try {
+          const data = new Uint8Array(await file.arrayBuffer());
+          const created = await this.notes.addAttachment(this.state.noteId, previous, file.name, file.type, data);
+          const blocks = [...this.state.blocks];
+          const index = blocks.findIndex((b) => b.block_id === previous);
+          blocks.splice(index < 0 ? blocks.length : index + 1, 0, created);
+          previous = created.block_id;
+          this.setState({ blocks });
+        } finally {
+          this.setState({ attaching: this.state.attaching - 1 });
+        }
+      });
+    }
+  }
+
+  /** Decrypts an attachment for display. The view calls this when it shows one. */
+  public loadMedia(blockId: string): void {
+    const block = this.find(blockId);
+    if (!block || block.kind !== "attachment" || this.state.media[blockId]) return;
+    const kind = EditorViewModel.INLINE[block.attrs.mime ?? ""] ?? "file";
+    this.setMedia(blockId, { kind, url: null, problem: null });
+    void this.notes.attachment(blockId).then(
+      (bytes) => {
+        if (this.disposed) return;
+        const type = kind === "file" ? "application/octet-stream" : block.attrs.mime;
+        const url = URL.createObjectURL(new Blob([bytes], { type }));
+        this.setMedia(blockId, { kind, url, problem: null });
+      },
+      (error: unknown) => {
+        if (!this.disposed) this.setMedia(blockId, { kind, url: null, problem: EditorViewModel.explainMedia(CoreFailure.from(error)) });
+      },
+    );
+  }
+
+  private setMedia(blockId: string, media: Media): void {
+    this.setState({ media: { ...this.state.media, [blockId]: media } });
+  }
+
+  private static explainMedia(failure: CoreFailure): string {
+    switch (failure.code) {
+      case "not_uploaded":
+        return "Not uploaded yet by the device it was added on.";
+      case "offline":
+      case "network":
+        return "Not on this device yet. It will load when you are online.";
+      case "corrupt":
+        return "This file failed its integrity check and was not opened.";
+      default:
+        return `The file could not be loaded (${failure.code}).`;
+    }
+  }
+
   // -------------------------------------------------------------- caret
 
   /** For a note that was just created: start typing its title. */
@@ -220,8 +348,12 @@ export class EditorViewModel extends ViewModel<EditorState> {
       // What the user typed and we have not saved yet stays as typed.
       const local = new Map(this.state.blocks.map((b) => [b.block_id, b]));
       const blocks = note.blocks.map((b) => (this.timers.has(b.block_id) ? (local.get(b.block_id) ?? b) : b));
+      // Attachments that could not be loaded get another try.
+      const media = Object.fromEntries(Object.entries(this.state.media).filter(([, m]) => m.problem === null));
       this.setState({
         blocks,
+        media,
+        folder: note.folder,
         title: this.timers.has(EditorViewModel.TITLE) ? this.state.title : note.title,
         gone: false,
       });
@@ -238,6 +370,9 @@ export class EditorViewModel extends ViewModel<EditorState> {
   public async dispose(): Promise<void> {
     await this.flush();
     this.disposed = true;
+    for (const media of Object.values(this.state.media)) {
+      if (media.url) URL.revokeObjectURL(media.url);
+    }
   }
 
   public dismissProblem(): void {
@@ -291,6 +426,8 @@ export class EditorViewModel extends ViewModel<EditorState> {
     switch (failure.code) {
       case "too_long":
         return "This block is too long to save. Split it into several blocks.";
+      case "too_large":
+        return "This file is too large to attach.";
       case "not_found":
         return "This part of the note was deleted on another device.";
       case "storage":
