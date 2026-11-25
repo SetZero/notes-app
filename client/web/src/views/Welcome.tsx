@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import hero from "../art/hero.webp";
 import { AppViewModel } from "../viewmodels/AppViewModel";
 import { useViewModel } from "../viewmodels/ViewModel";
 
@@ -20,10 +21,14 @@ export function Welcome({ app }: { app: AppViewModel }) {
   };
 
   return (
-    <main className="center">
+    <main className="center scenic">
+      <div className="welcome">
+        <img className="mascot" src={hero} alt="" />
       <form className="card" onSubmit={submit} autoComplete="off">
-        <h1>Notes</h1>
-        <p className="muted">End-to-end encrypted. Your notes are readable on your devices only.</p>
+        <h1 className="brand">
+          Notes <span aria-hidden="true">✿</span>
+        </h1>
+        <p className="muted">Okaeri! Your notes are end-to-end encrypted and readable on your devices only.</p>
 
         <div className="tabs" role="tablist">
           <button type="button" role="tab" aria-selected={mode === "new"} onClick={() => setMode("new")}>
@@ -86,6 +91,7 @@ export function Welcome({ app }: { app: AppViewModel }) {
           </button>
         </div>
       </form>
+      </div>
     </main>
   );
 }

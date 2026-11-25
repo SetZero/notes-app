@@ -736,3 +736,295 @@ dialog > header {
     display: flex;
   }
 }
+
+/* =========================================================================
+   Sakura theme. Everything above is layout; this part is the look: pastel
+   colours, rounded shapes and the artwork in src/art.
+   ========================================================================= */
+
+:root {
+  --bg: #fff8fc;
+  --panel: #fdeef6;
+  --raised: #ffffff;
+  --text: #3d2f4f;
+  --muted: #8d7b9f;
+  --line: #f3d6e6;
+  --accent: #d9569c;
+  --accent-2: #8c78d9;
+  --accent-text: #ffffff;
+  --danger: #c2334f;
+  --warn-bg: #fff1c9;
+  --warn-text: #6b4a00;
+  --banner: url("./art/banner-day.webp");
+  --shadow: 0 8px 30px rgb(217 86 156 / 0.14);
+  font-family: ui-rounded, "Hiragino Maru Gothic ProN", "Nunito", "Quicksand", "Segoe UI", system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1a1526;
+    --panel: #221b33;
+    --raised: #2d2442;
+    --text: #f3ebfc;
+    --muted: #ab9cc4;
+    --line: #3d3156;
+    --accent: #f78cc2;
+    --accent-2: #b3a2ff;
+    --accent-text: #2a1030;
+    --danger: #ff8fa3;
+    --warn-bg: #44351a;
+    --warn-text: #ffe3a1;
+    --banner: url("./art/banner-night.webp");
+    --shadow: 0 8px 30px rgb(0 0 0 / 0.4);
+  }
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+button {
+  border-radius: 999px;
+  transition:
+    transform 0.08s ease,
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+button.primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border-color: transparent;
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+input,
+textarea,
+select {
+  border-radius: 12px;
+}
+
+input:focus-visible,
+select:focus-visible,
+label textarea:focus-visible {
+  outline: 2px solid var(--accent-2);
+  border-color: transparent;
+}
+
+.brand {
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+.brand span {
+  color: var(--accent);
+}
+
+.pill {
+  background: color-mix(in srgb, var(--raised) 75%, transparent);
+  border-color: transparent;
+}
+
+.pill.idle {
+  color: var(--accent-2);
+}
+
+/* ---- screens before the workspace: the sky behind a card */
+
+.scenic {
+  background:
+    linear-gradient(color-mix(in srgb, var(--bg) 35%, transparent), color-mix(in srgb, var(--bg) 80%, transparent)),
+    var(--banner) center / cover no-repeat fixed;
+}
+
+.card {
+  border-radius: 24px;
+  border-color: color-mix(in srgb, var(--line) 60%, transparent);
+  box-shadow: var(--shadow);
+  background: color-mix(in srgb, var(--raised) 92%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.welcome {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  gap: 0;
+  width: min(100%, 46rem);
+}
+
+.welcome .mascot {
+  width: 19rem;
+  max-width: 42%;
+  border-radius: 28px 0 0 28px;
+  min-height: 0;
+  height: auto;
+  object-fit: cover;
+  object-position: top;
+  box-shadow: var(--shadow);
+}
+
+.welcome .card {
+  border-radius: 0 28px 28px 0;
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+
+.loading {
+  text-align: center;
+}
+
+.loading img {
+  border-radius: 28px;
+  box-shadow: var(--shadow);
+  animation: bob 1.6s ease-in-out infinite;
+}
+
+@keyframes bob {
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+.tabs {
+  border-radius: 999px;
+}
+
+.tabs button[aria-selected="true"] {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.words {
+  border-radius: 16px;
+}
+
+/* ---- workspace */
+
+.sidebar {
+  border-right-color: color-mix(in srgb, var(--line) 70%, transparent);
+}
+
+.sidebar > header {
+  background:
+    linear-gradient(color-mix(in srgb, var(--panel) 15%, transparent), var(--panel)),
+    var(--banner) center 30% / cover no-repeat;
+  padding-top: 2.6rem;
+  padding-bottom: 0.9rem;
+  margin-bottom: 0.4rem;
+}
+
+.sidebar > header h1 {
+  font-size: 1.5rem;
+  text-shadow: 0 1px 8px var(--panel);
+}
+
+.notes button,
+.folders button {
+  border-radius: 14px;
+}
+
+.notes button[aria-current="true"],
+.folders button[aria-current="true"] {
+  box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.notes button[aria-current="true"] strong {
+  color: var(--accent);
+}
+
+.menu ul {
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+}
+
+.placeholder {
+  text-align: center;
+}
+
+.placeholder img {
+  display: block;
+  width: min(24rem, 70vw);
+  border-radius: 28px;
+  margin: 0 auto 0.5rem;
+  mix-blend-mode: multiply;
+}
+
+@media (prefers-color-scheme: dark) {
+  .placeholder img {
+    mix-blend-mode: normal;
+    opacity: 0.92;
+  }
+}
+
+/* ---- editor */
+
+.editor textarea.title {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  caret-color: var(--accent);
+}
+
+.editor textarea.title::placeholder {
+  color: var(--muted);
+  opacity: 0.6;
+}
+
+.editor textarea.heading {
+  color: var(--accent-2);
+}
+
+.editor textarea.code {
+  border-radius: 14px;
+  border: 1px solid var(--line);
+}
+
+.block input[type="checkbox"] {
+  border-radius: 6px;
+}
+
+.media img,
+.media video {
+  border-radius: 16px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.08);
+}
+
+dialog {
+  border-radius: 24px;
+  box-shadow: var(--shadow);
+}
+
+dialog::backdrop {
+  background: color-mix(in srgb, var(--accent-2) 25%, rgb(0 0 0 / 0.45));
+  backdrop-filter: blur(3px);
+}
+
+@media (max-width: 720px) {
+  .welcome {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .welcome .mascot {
+    width: 100%;
+    max-width: none;
+    height: 13rem;
+    border-radius: 28px 28px 0 0;
+  }
+
+  .welcome .card {
+    border-radius: 0 0 28px 28px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading img {
+    animation: none;
+  }
+}

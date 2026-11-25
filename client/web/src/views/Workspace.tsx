@@ -3,6 +3,7 @@ import type { EditorViewModel } from "../viewmodels/EditorViewModel";
 import type { SyncState } from "../viewmodels/SyncController";
 import { useViewModel } from "../viewmodels/ViewModel";
 import type { WorkspaceViewModel } from "../viewmodels/WorkspaceViewModel";
+import empty from "../art/empty.webp";
 import { Editor } from "./Editor";
 import { Modal } from "./Modal";
 import { RecoveryKitCard } from "./RecoveryKitCard";
@@ -104,7 +105,9 @@ export function Workspace({ workspace }: { workspace: WorkspaceViewModel }) {
     <div className={`workspace${state.selectedId ? " has-note" : ""}`}>
       <aside className="sidebar">
         <header>
-          <h1>Notes</h1>
+          <h1 className="brand">
+            Notes <span aria-hidden="true">✿</span>
+          </h1>
           <span className={`pill ${sync.phase}`} title={sync.problem ?? undefined}>
             {syncLabel(sync)}
           </span>
@@ -183,7 +186,7 @@ export function Workspace({ workspace }: { workspace: WorkspaceViewModel }) {
               </button>
             </li>
           ))}
-          {notes.length === 0 && <li className="muted empty">{state.query ? "No note matches." : "No notes yet."}</li>}
+          {notes.length === 0 && <li className="muted empty">{state.query ? "No note matches." : "No notes yet. Write the first one ✿"}</li>}
         </ul>
       </aside>
 
@@ -194,7 +197,10 @@ export function Workspace({ workspace }: { workspace: WorkspaceViewModel }) {
             <Editor key={state.editor.state.noteId} editor={state.editor} />
           </>
         ) : (
-          <p className="muted placeholder">Select a note, or create a new one.</p>
+          <div className="placeholder">
+            <img src={empty} alt="" />
+            <p className="muted">Pick a note, or start a new one ✿</p>
+          </div>
         )}
       </section>
 
