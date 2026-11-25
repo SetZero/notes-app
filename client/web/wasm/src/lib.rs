@@ -11,7 +11,7 @@ use js_sys::{Array, Reflect, Uint8Array};
 use notes_core::hal::{
     Entropy, FileStore, HalError, HttpRequest, HttpResponse, HttpTransport, NetworkMonitor, SecureStore, TimeSource,
 };
-use notes_core::{Core, CoreError};
+use notes_core::{Core, CoreError, Login};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
@@ -177,9 +177,26 @@ impl NotesApp {
         promise!(self, |core| core.create_account(&server_url, &invite_code, &device_name).await.map(|kit| json(&kit)))
     }
 
-    pub fn recover(&self, server_url: String, account_id: String, phrase: String, device_name: String) -> js_sys::Promise {
+    /// A new account for someone who signed in at the server's identity provider.
+    #[wasm_bindgen(js_name = createAccountWithLogin)]
+    pub fn create_account_with_login(&self, server_url: String, provider: String, id_token: String, device_name: String) -> js_sys::Promise {
+        let login = Login { provider, id_token };
+        promise!(self, |core| core.create_account_with_login(&server_url, &login, &device_name).await.map(|kit| json(&kit)))
+    }
+
+    /// `provider` and `id_token` are the sign-in of an account that was created with one.
+    pub fn recover(
+        &self,
+        server_url: String,
+        account_id: String,
+        phrase: String,
+        device_name: String,
+        provider: Option<String>,
+        id_token: Option<String>,
+    ) -> js_sys::Promise {
+        let login = provider.zip(id_token).map(|(provider, id_token)| Login { provider, id_token });
         promise!(self, |core| core
-            .recover(&server_url, &account_id, &phrase, &device_name)
+            .recover_with_login(&server_url, &account_id, &phrase, login.as_ref(), &device_name)
             .await
             .map(|()| JsValue::UNDEFINED))
     }

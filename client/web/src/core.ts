@@ -81,7 +81,10 @@ export class CoreFailure {
   ) {}
 
   public static from(error: unknown): CoreFailure {
-    const raw = error as { code?: unknown; message?: unknown; retryAfter?: unknown } | null | undefined;
+    const raw = error as
+      | { code?: unknown; message?: unknown; retryAfter?: unknown }
+      | null
+      | undefined;
     return new CoreFailure(
       typeof raw?.code === "string" ? raw.code : "unknown",
       typeof raw?.message === "string" ? raw.message : String(error),
@@ -108,12 +111,48 @@ export class Notes {
     return Notes.parse(this.app.status());
   }
 
-  public async createAccount(serverUrl: string, inviteCode: string, deviceName: string): Promise<RecoveryKit> {
-    return Notes.parse(await this.app.createAccount(serverUrl, inviteCode, deviceName));
+  public async createAccount(
+    serverUrl: string,
+    inviteCode: string,
+    deviceName: string,
+  ): Promise<RecoveryKit> {
+    return Notes.parse(
+      await this.app.createAccount(serverUrl, inviteCode, deviceName),
+    );
   }
 
-  public async recover(serverUrl: string, accountId: string, phrase: string, deviceName: string): Promise<void> {
-    await this.app.recover(serverUrl, accountId, phrase, deviceName);
+  /** A new account for someone who signed in at the server's identity provider. */
+  public async createAccountWithLogin(
+    serverUrl: string,
+    login: { provider: string; idToken: string },
+    deviceName: string,
+  ): Promise<RecoveryKit> {
+    return Notes.parse(
+      await this.app.createAccountWithLogin(
+        serverUrl,
+        login.provider,
+        login.idToken,
+        deviceName,
+      ),
+    );
+  }
+
+  /** `login` is needed for an account that was created with a sign-in. */
+  public async recover(
+    serverUrl: string,
+    accountId: string,
+    phrase: string,
+    deviceName: string,
+    login: { provider: string; idToken: string } | null = null,
+  ): Promise<void> {
+    await this.app.recover(
+      serverUrl,
+      accountId,
+      phrase,
+      deviceName,
+      login?.provider,
+      login?.idToken,
+    );
   }
 
   public recoveryKit(): RecoveryKit {
@@ -149,8 +188,22 @@ export class Notes {
   }
 
   /** Encrypts a file and adds it to the note after `after` (or at the top). */
-  public async addAttachment(noteId: string, after: string | null, name: string, mime: string, data: Uint8Array): Promise<Block> {
-    return Notes.parse(await this.app.addAttachment(noteId, after ?? undefined, name, mime, data));
+  public async addAttachment(
+    noteId: string,
+    after: string | null,
+    name: string,
+    mime: string,
+    data: Uint8Array,
+  ): Promise<Block> {
+    return Notes.parse(
+      await this.app.addAttachment(
+        noteId,
+        after ?? undefined,
+        name,
+        mime,
+        data,
+      ),
+    );
   }
 
   /** The decrypted file of an attachment block. */
@@ -163,12 +216,24 @@ export class Notes {
   }
 
   /** Adds a block after `after`, or at the top of the note without it. */
-  public async insertBlock(noteId: string, after: string | null, kind: BlockKind, text: string): Promise<Block> {
-    return Notes.parse(await this.app.insertBlock(noteId, after ?? undefined, kind, text));
+  public async insertBlock(
+    noteId: string,
+    after: string | null,
+    kind: BlockKind,
+    text: string,
+  ): Promise<Block> {
+    return Notes.parse(
+      await this.app.insertBlock(noteId, after ?? undefined, kind, text),
+    );
   }
 
   public async updateBlock(block: Block): Promise<void> {
-    await this.app.updateBlock(block.block_id, block.kind, block.text, JSON.stringify(block.attrs));
+    await this.app.updateBlock(
+      block.block_id,
+      block.kind,
+      block.text,
+      JSON.stringify(block.attrs),
+    );
   }
 
   /** Moves a block behind `after`, or to the top of its note without it. */

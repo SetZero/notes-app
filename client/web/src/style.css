@@ -1194,3 +1194,44 @@ button.icon {
 .editor {
   overflow-x: hidden;
 }
+
+/* ---- sign-in at the identity provider */
+
+.signin {
+  margin-top: 1rem;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.signin button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.9rem;
+  font-weight: 700;
+  border: 1.5px solid var(--ink);
+  box-shadow: var(--shadow-small);
+}
+
+.signin button:active:not(:disabled) {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+
+.signin .signed-in {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  border: 1.5px solid var(--accent-2);
+  color: var(--accent-2);
+  overflow-wrap: anywhere;
+}
+
+.signin .hint {
+  margin: 0;
+  font-size: 0.85rem;
+}

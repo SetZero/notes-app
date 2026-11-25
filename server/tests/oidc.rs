@@ -310,3 +310,25 @@ async fn recovery_of_an_oidc_account_needs_phrase_and_login() {
     let (status, _) = app.pull(&account.token, "since=0").await;
     assert_eq!(status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn web_app_may_reach_the_identity_provider_and_nothing_else() {
+    let idp = MockIdp::start().await;
+    let provider = idp.config();
+    let web = tempfile::tempdir().unwrap();
+    std::fs::write(web.path().join("index.html"), "<!doctype html><title>Notes</title>").unwrap();
+    let dir = web.path().to_path_buf();
+    let app = app_with(move |c| {
+        c.server.static_dir = Some(dir);
+        c.enrollment.mode = EnrollmentMode::Either;
+        c.oidc = vec![provider];
+    })
+    .await;
+
+    let (status, headers, _) = app.send(None, Method::GET, "/app/", None, &[], axum::body::Body::empty()).await;
+    assert_eq!(status, StatusCode::OK);
+    let csp = headers["content-security-policy"].to_str().unwrap();
+    // The issuer's origin, without its path, and only for connections.
+    assert!(csp.contains(&format!("connect-src 'self' {};", idp.issuer)), "{csp}");
+    assert_eq!(csp.matches(&idp.issuer).count(), 1, "{csp}");
+}

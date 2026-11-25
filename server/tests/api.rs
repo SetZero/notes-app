@@ -632,6 +632,8 @@ async fn web_app_is_served_with_a_strict_content_security_policy() {
     let csp = headers["content-security-policy"].to_str().unwrap();
     assert!(csp.starts_with("default-src 'none'; script-src 'self' 'wasm-unsafe-eval';"));
     assert!(csp.contains("require-trusted-types-for 'script'"));
+    // Without an identity provider the app may talk to this server only.
+    assert!(csp.contains("connect-src 'self';"));
     assert!(!csp.contains("unsafe-inline"));
     assert_eq!(headers["cache-control"], "no-cache");
     assert_eq!(headers["x-frame-options"], "DENY");

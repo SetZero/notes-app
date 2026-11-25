@@ -183,18 +183,40 @@ async fn not_found() -> ApiError {
 /// `wasm-unsafe-eval` permits compiling the app's own WebAssembly module and
 /// nothing else. `blob:` is for attachments, which the app decrypts in memory
 /// and shows as images, audio or video only (never as documents or scripts).
-const WEB_APP_CSP: &str = concat!(
-    "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; ",
-    "img-src 'self' blob:; media-src blob:; connect-src 'self'; manifest-src 'self'; ",
-    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'; ",
-    "require-trusted-types-for 'script'; trusted-types 'none'",
-);
+///
+/// The one exception to "own files only": to sign in, the app asks the
+/// configured identity providers for their endpoints and trades the login
+/// code for an ID token there. `identity_providers` are their origins.
+fn web_app_csp(identity_providers: &[String]) -> String {
+    let mut connect = String::from("'self'");
+    for origin in identity_providers {
+        connect.push(' ');
+        connect.push_str(origin);
+    }
+    format!(
+        "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; \
+         img-src 'self' blob:; media-src blob:; connect-src {connect}; manifest-src 'self'; \
+         base-uri 'none'; form-action 'none'; frame-ancestors 'none'; \
+         require-trusted-types-for 'script'; trusted-types 'none'"
+    )
+}
+
+/// `scheme://host[:port]` of an issuer URL, or `None` when it holds anything
+/// that could change the meaning of the policy it is written into.
+fn origin_of(issuer: &str) -> Option<String> {
+    let (scheme, rest) = issuer.split_once("://")?;
+    let authority = rest.split('/').next()?;
+    let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']');
+    let valid = matches!(scheme, "https" | "http") && !authority.is_empty() && authority.chars().all(plain);
+    valid.then(|| format!("{scheme}://{authority}"))
+}
 
 /// The API returns data, never documents: it may load and run nothing.
 const API_CSP: &str = "default-src 'none'; frame-ancestors 'none'";
 
 /// The built web app from `dir`, mounted by the caller at `/app`.
-fn web_app(dir: &std::path::Path) -> Router {
+fn web_app(dir: &std::path::Path, identity_providers: &[String]) -> Router {
+    let csp = HeaderValue::from_str(&web_app_csp(identity_providers)).expect("origins are plain ASCII");
     // The page uses relative URLs, which resolve correctly only below "/app/".
     async fn add_slash(OriginalUri(uri): OriginalUri, request: Request, next: Next) -> Response {
         if uri.path() == "/app" {
@@ -211,7 +233,7 @@ fn web_app(dir: &std::path::Path) -> Router {
         // Always ask the server whether a file changed, so that a fixed
         // version of the app is in use right after it is deployed.
         .layer(overriding(header::CACHE_CONTROL, "no-cache"))
-        .layer(overriding(header::CONTENT_SECURITY_POLICY, WEB_APP_CSP))
+        .layer(SetResponseHeaderLayer::overriding(header::CONTENT_SECURITY_POLICY, csp))
         .layer(overriding(
             HeaderName::from_static("cross-origin-opener-policy"),
             "same-origin",
@@ -260,10 +282,13 @@ pub fn router(state: AppState) -> Router {
         .merge(blob_api)
         .merge(events_api);
 
+    let mut identity_providers: Vec<String> = state.oidc.configs().filter_map(|p| origin_of(&p.issuer)).collect();
+    identity_providers.sort();
+    identity_providers.dedup();
     app = match &state.config.server.static_dir {
         Some(dir) => app
             .route("/", get(|| async { Redirect::temporary("/app/") }))
-            .nest_service("/app", web_app(dir))
+            .nest_service("/app", web_app(dir, &identity_providers))
             .fallback(not_found),
         None => app.fallback(not_found),
     };
@@ -296,4 +321,28 @@ pub fn router(state: AppState) -> Router {
         ));
     }
     app.layer(axum::middleware::from_fn(request_id)).with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn origin_of_an_issuer() {
+        assert_eq!(origin_of("https://id.example/realms/main").as_deref(), Some("https://id.example"));
+        assert_eq!(origin_of("http://127.0.0.1:8080").as_deref(), Some("http://127.0.0.1:8080"));
+        assert_eq!(origin_of("https://[::1]:8443/x").as_deref(), Some("https://[::1]:8443"));
+        // Nothing that could add a source or a directive to the policy.
+        for bad in ["https://id.example; script-src *", "https://a b/", "https://*/", "ftp://id.example", "id.example", "https:///x", "https://user@id.example/"] {
+            assert_eq!(origin_of(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn policy_lists_identity_providers_for_connections_only() {
+        let csp = web_app_csp(&["https://id.example".into()]);
+        assert!(csp.contains("connect-src 'self' https://id.example; "));
+        assert_eq!(csp.matches("https://id.example").count(), 1);
+        assert!(web_app_csp(&[]).contains("connect-src 'self'; "));
+    }
 }

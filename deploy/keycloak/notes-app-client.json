@@ -1,0 +1,26 @@
+{
+  "clientId": "notes-app",
+  "name": "Notes",
+  "description": "Sign-in for the notes app. Public client: authorization code flow with PKCE, no secret.",
+  "enabled": true,
+  "protocol": "openid-connect",
+  "publicClient": true,
+  "standardFlowEnabled": true,
+  "implicitFlowEnabled": false,
+  "directAccessGrantsEnabled": false,
+  "serviceAccountsEnabled": false,
+  "frontchannelLogout": false,
+  "consentRequired": false,
+  "fullScopeAllowed": false,
+  "rootUrl": "https://notes.magical.rocks",
+  "baseUrl": "/app/",
+  "redirectUris": ["https://notes.magical.rocks/app/"],
+  "webOrigins": ["https://notes.magical.rocks"],
+  "attributes": {
+    "pkce.code.challenge.method": "S256",
+    "post.logout.redirect.uris": "",
+    "oauth2.device.authorization.grant.enabled": "false"
+  },
+  "defaultClientScopes": ["basic", "profile", "email"],
+  "optionalClientScopes": []
+}

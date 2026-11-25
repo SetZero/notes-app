@@ -103,6 +103,16 @@ pub struct Status {
     pub notes: usize,
 }
 
+/// A finished sign-in at one of the server's identity providers. The app
+/// shell runs the sign-in (it needs a browser) with a nonce from the server.
+#[derive(Clone, Serialize)]
+pub struct Login {
+    /// The provider's id from the server's `/v1/meta`.
+    pub provider: String,
+    /// The ID token the provider issued. Single use: the server consumes its nonce.
+    pub id_token: String,
+}
+
 #[derive(Serialize)]
 pub struct RecoveryKit {
     pub server_url: String,
@@ -677,6 +687,30 @@ impl<P: Platform> Core<P> {
         invite_code: &str,
         device_name: &str,
     ) -> Result<RecoveryKit> {
+        self.enroll(server_url, Some(invite_code), None, device_name)
+            .await
+    }
+
+    /// Like [`Self::create_account`], for a server that wants a sign-in at
+    /// its identity provider instead of an invite code. The account is then
+    /// bound to that identity: recovery needs the phrase and a sign-in.
+    pub async fn create_account_with_login(
+        &self,
+        server_url: &str,
+        login: &Login,
+        device_name: &str,
+    ) -> Result<RecoveryKit> {
+        self.enroll(server_url, None, Some(login), device_name)
+            .await
+    }
+
+    async fn enroll(
+        &self,
+        server_url: &str,
+        invite_code: Option<&str>,
+        login: Option<&Login>,
+        device_name: &str,
+    ) -> Result<RecoveryKit> {
         if self.state.borrow().session.is_some() {
             return Err(CoreError::input("this device already has an account"));
         }
@@ -693,12 +727,16 @@ impl<P: Platform> Core<P> {
 
         #[derive(Serialize)]
         struct Request<'a> {
-            invite_code: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            invite_code: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            oidc: Option<&'a Login>,
             device_name: &'a str,
             recovery_verifier: String,
         }
         let request = Request {
-            invite_code: invite_code.trim(),
+            invite_code: invite_code.map(str::trim),
+            oidc: login,
             device_name,
             recovery_verifier: B64.encode(crypto::recovery_verifier(&key)),
         };
@@ -724,6 +762,21 @@ impl<P: Platform> Core<P> {
         phrase: &str,
         device_name: &str,
     ) -> Result<()> {
+        self.recover_with_login(server_url, account_id, phrase, None, device_name)
+            .await
+    }
+
+    /// Like [`Self::recover`], with the sign-in an account needs that was
+    /// created with one. The phrase is still required: the sign-in proves
+    /// who asks, the phrase holds the key.
+    pub async fn recover_with_login(
+        &self,
+        server_url: &str,
+        account_id: &str,
+        phrase: &str,
+        login: Option<&Login>,
+        device_name: &str,
+    ) -> Result<()> {
         if self.state.borrow().session.is_some() {
             return Err(CoreError::input("this device already has an account"));
         }
@@ -742,10 +795,13 @@ impl<P: Platform> Core<P> {
 
         #[derive(Serialize)]
         struct Request<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            oidc: Option<&'a Login>,
             device_name: &'a str,
             recovery_verifier: String,
         }
         let request = Request {
+            oidc: login,
             device_name,
             recovery_verifier: B64.encode(crypto::recovery_verifier(&key)),
         };
@@ -1239,7 +1295,8 @@ impl<P: Platform> Core<P> {
         // An attachment keeps its file. Its name (the text) and how it is
         // shown (width, alignment, caption) can change.
         if payload.kind == "attachment" || kind == "attachment" {
-            let file = |attrs: &BTreeMap<String, String>| FILE_ATTRS.map(|name| attrs.get(name).cloned());
+            let file =
+                |attrs: &BTreeMap<String, String>| FILE_ATTRS.map(|name| attrs.get(name).cloned());
             if payload.kind != kind || file(&payload.attrs) != file(&attrs) {
                 return Err(CoreError::input("an attachment stays an attachment"));
             }
@@ -1259,22 +1316,43 @@ impl<P: Platform> Core<P> {
         let (note_id, mut payload) = {
             let state = self.state.borrow();
             let Some(block) = state.blocks.get(block_id) else {
-                return Err(CoreError::new("not_found", "this block does not exist any more"));
+                return Err(CoreError::new(
+                    "not_found",
+                    "this block does not exist any more",
+                ));
             };
             let Some(payload) = block.payload.clone().filter(|p| p.kind != "header") else {
-                return Err(CoreError::new("not_found", "this block does not exist any more"));
+                return Err(CoreError::new(
+                    "not_found",
+                    "this block does not exist any more",
+                ));
             };
             let note_id = block.envelope.note_id.clone();
             let (_, content) = Self::note_blocks(&state, &note_id);
             // The neighbours at the new place, not counting the block itself.
-            let others: Vec<&Block> = content.into_iter().filter(|b| b.envelope.block_id != block_id).collect();
+            let others: Vec<&Block> = content
+                .into_iter()
+                .filter(|b| b.envelope.block_id != block_id)
+                .collect();
             let index = match after {
                 Some(after) if after == block_id => return Ok(()),
-                Some(after) => others.iter().position(|b| b.envelope.block_id == after).map_or(others.len(), |i| i + 1),
+                Some(after) => others
+                    .iter()
+                    .position(|b| b.envelope.block_id == after)
+                    .map_or(others.len(), |i| i + 1),
                 None => 0,
             };
-            let order_at = |i: usize| others.get(i).and_then(|b| b.payload.as_ref()).map(|p| p.order.as_str());
-            let low = if index == 0 { "" } else { order_at(index - 1).unwrap_or("") };
+            let order_at = |i: usize| {
+                others
+                    .get(i)
+                    .and_then(|b| b.payload.as_ref())
+                    .map(|p| p.order.as_str())
+            };
+            let low = if index == 0 {
+                ""
+            } else {
+                order_at(index - 1).unwrap_or("")
+            };
             let order = order::between(low, order_at(index));
             (note_id, Payload { order, ..payload })
         };
