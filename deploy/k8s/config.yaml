@@ -21,17 +21,16 @@ data:
     trusted_proxies = ["10.42.0.0/16"]
 
     [enrollment]
-    # "invite": new accounts need the code from the notes-syncd-invite secret.
-    # Switch to "either" or "oidc" after adding a provider below.
-    mode = "invite"
+    # "either": a new account needs a sign-in at Keycloak or the code from
+    # the notes-syncd-invite secret. "oidc" would accept the sign-in only.
+    mode = "either"
 
-    # Sign-in with the Keycloak on this cluster. Create a public client with
-    # the standard flow and PKCE in the realm first, then fill in realm and
-    # client id and uncomment.
-    # [[oidc]]
-    # id = "keycloak"
-    # issuer = "https://keycloak.magical.rocks/realms/<realm>"
-    # client_id = "notes-app"
-    # algorithms = ["RS256"]
+    # Sign-in with the Keycloak on this cluster. The client is a public one
+    # with the standard flow and PKCE; deploy/keycloak has it for import.
+    [[oidc]]
+    id = "keycloak"
+    issuer = "https://keycloak.magical.rocks/realms/master"
+    client_id = "notes-app"
+    algorithms = ["RS256"]
     # Optional: only members of a group or role may create accounts.
     # required_claim = { name = "groups", value = "notes" }
