@@ -1,5 +1,5 @@
-# Its own namespace, so that the access CI gets (ci-access.yaml) cannot touch
-# anything else in the cluster.
+# Its own namespace, so that the job that rolls out new versions (updater.yaml)
+# cannot touch anything else in the cluster.
 apiVersion: v1
 kind: Namespace
 metadata:

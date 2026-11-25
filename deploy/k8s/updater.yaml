@@ -1,0 +1,134 @@
+# Rolls out new server versions.
+#
+# The API server of the cluster is not reachable from the internet, so CI
+# cannot push a deployment in. Instead this job looks every five minutes at
+# which image "latest" currently is in the registry, and if the deployment
+# runs another one, switches it to that exact digest.
+#
+# This also means no cluster credential is stored at GitHub. The job runs as a
+# service account that can change this one namespace's deployments and nothing
+# else: no secrets, no pods/exec, nothing outside "notes".
+#
+# Whoever can publish ghcr.io/setzero/notes-syncd:latest decides what runs
+# here. That is CI on the main branch of the repository.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: image-updater
+  namespace: notes
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: image-updater
+  namespace: notes
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: image-updater
+  namespace: notes
+subjects:
+  - kind: ServiceAccount
+    name: image-updater
+    namespace: notes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: image-updater
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: image-updater
+  namespace: notes
+data:
+  update.sh: |
+    #!/bin/sh
+    set -eu
+    REPO=setzero/notes-syncd
+    IMAGE=ghcr.io/$REPO
+    token=$(curl -fsS --retry 3 "https://ghcr.io/token?scope=repository:$REPO:pull" | jq -r .token)
+    digest=$(curl -fsSI --retry 3 \
+        -H "Authorization: Bearer $token" \
+        -H "Accept: application/vnd.oci.image.index.v1+json" \
+        "https://ghcr.io/v2/$REPO/manifests/latest" \
+      | tr -d "\r" | awk 'tolower($1) == "docker-content-digest:" { print $2 }')
+    # Never roll out something that is not a plain sha256 digest.
+    if ! echo "$digest" | grep -Eq "^sha256:[0-9a-f]{64}$"; then
+      echo "unexpected digest from the registry: $digest" >&2
+      exit 1
+    fi
+    current=$(kubectl get deployment notes-syncd -o jsonpath="{.spec.template.spec.containers[0].image}")
+    if [ "$current" = "$IMAGE@$digest" ]; then
+      echo "up to date: $digest"
+      exit 0
+    fi
+    echo "rolling out $IMAGE@$digest (was $current)"
+    kubectl set image deployment/notes-syncd "notes-syncd=$IMAGE@$digest"
+    kubectl rollout status deployment/notes-syncd --timeout=180s
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: image-updater
+  namespace: notes
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 300
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          serviceAccountName: image-updater
+          restartPolicy: Never
+          enableServiceLinks: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: update
+              image: alpine/k8s:1.37.2
+              command: ["/bin/sh", "/scripts/update.sh"]
+              env:
+                - name: HOME
+                  value: /tmp
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
+          volumes:
+            - name: scripts
+              configMap:
+                name: image-updater
+            - name: tmp
+              emptyDir: {}

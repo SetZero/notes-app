@@ -33,7 +33,7 @@ spec:
       terminationGracePeriodSeconds: 20
       containers:
         - name: notes-syncd
-          # CI replaces this with the exact image digest it just built.
+          # The image-updater job replaces this with the digest of the newest image.
           image: ghcr.io/setzero/notes-syncd:latest
           imagePullPolicy: Always
           ports:

@@ -6,7 +6,7 @@
 #
 # It creates the invite code once (never overwrites it), applies everything in
 # deploy/k8s and waits for the server to be up. Rolling out new versions of
-# the server is done by CI and does not need this script.
+# the server happens by itself (k8s/updater.yaml) and does not need this script.
 set -euo pipefail
 cd "$(dirname "$0")"
 NS=notes
@@ -21,7 +21,7 @@ if ! kubectl -n "$NS" get secret notes-syncd-invite >/dev/null 2>&1; then
   echo "  kubectl -n $NS get secret notes-syncd-invite -o jsonpath={.data.invite-code} | base64 -d"
 fi
 
-# Keep the image CI deployed last; the manifest only names :latest.
+# Keep the image that is deployed now; the manifest only names :latest.
 current=$(kubectl -n "$NS" get deployment notes-syncd \
   -o jsonpath="{.spec.template.spec.containers[0].image}" 2>/dev/null || true)
 
