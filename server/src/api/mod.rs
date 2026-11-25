@@ -4,11 +4,13 @@ mod accounts;
 mod pairing;
 mod sync;
 
-use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequest, FromRequestParts, Request, State};
+use axum::extract::{
+    ConnectInfo, DefaultBodyLimit, FromRequest, FromRequestParts, OriginalUri, Request, State,
+};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use std::net::{IpAddr, SocketAddr};
@@ -175,6 +177,49 @@ async fn not_found() -> ApiError {
     ApiError::not_found()
 }
 
+/// What the web app may do in the browser. It holds the account key, so the
+/// policy allows nothing but its own files: no inline or remote scripts, no
+/// remote styles, images or connections, no framing, no DOM injection sinks.
+/// `wasm-unsafe-eval` permits compiling the app's own WebAssembly module and
+/// nothing else.
+const WEB_APP_CSP: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval';     style-src 'self'; img-src 'self'; connect-src 'self'; manifest-src 'self';     base-uri 'none'; form-action 'none'; frame-ancestors 'none';     require-trusted-types-for 'script'; trusted-types 'none'";
+
+/// The API returns data, never documents: it may load and run nothing.
+const API_CSP: &str = "default-src 'none'; frame-ancestors 'none'";
+
+/// The built web app from `dir`, mounted by the caller at `/app`.
+fn web_app(dir: &std::path::Path) -> Router {
+    // The page uses relative URLs, which resolve correctly only below "/app/".
+    async fn add_slash(OriginalUri(uri): OriginalUri, request: Request, next: Next) -> Response {
+        if uri.path() == "/app" {
+            return Redirect::permanent("/app/").into_response();
+        }
+        next.run(request).await
+    }
+    let overriding = |name: HeaderName, value: &'static str| {
+        SetResponseHeaderLayer::overriding(name, HeaderValue::from_static(value))
+    };
+    Router::new()
+        .fallback_service(tower_http::services::ServeDir::new(dir))
+        .layer(axum::middleware::from_fn(add_slash))
+        // Always ask the server whether a file changed, so that a fixed
+        // version of the app is in use right after it is deployed.
+        .layer(overriding(header::CACHE_CONTROL, "no-cache"))
+        .layer(overriding(header::CONTENT_SECURITY_POLICY, WEB_APP_CSP))
+        .layer(overriding(
+            HeaderName::from_static("cross-origin-opener-policy"),
+            "same-origin",
+        ))
+        .layer(overriding(
+            HeaderName::from_static("cross-origin-resource-policy"),
+            "same-origin",
+        ))
+        .layer(overriding(
+            HeaderName::from_static("permissions-policy"),
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+        ))
+}
+
 pub fn router(state: AppState) -> Router {
     let json_api = Router::new()
         .route("/v1/meta", get(meta))
@@ -211,7 +256,8 @@ pub fn router(state: AppState) -> Router {
 
     app = match &state.config.server.static_dir {
         Some(dir) => app
-            .nest_service("/app", tower_http::services::ServeDir::new(dir))
+            .route("/", get(|| async { Redirect::temporary("/app/") }))
+            .nest_service("/app", web_app(dir))
             .fallback(not_found),
         None => app.fallback(not_found),
     };
@@ -220,6 +266,10 @@ pub fn router(state: AppState) -> Router {
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(API_CSP),
         ))
         .layer(SetResponseHeaderLayer::overriding(
             header::X_CONTENT_TYPE_OPTIONS,

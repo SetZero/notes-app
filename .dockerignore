@@ -1,0 +1,12 @@
+# Only what the Dockerfile copies is sent to the builder.
+*
+!common/core/Cargo.toml
+!common/core/src
+!client/web
+client/web/node_modules
+client/web/dist
+client/web/src/pkg
+client/web/wasm/target
+!server/Cargo.toml
+!server/Cargo.lock
+!server/src

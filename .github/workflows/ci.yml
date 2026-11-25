@@ -28,8 +28,44 @@ env:
   IMAGE: ghcr.io/setzero/notes-syncd
 
 jobs:
+  core:
+    name: Core and web app
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      # Version and targets come from rust-toolchain.toml.
+      - name: Install the Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: |
+            common/core
+            client/web/wasm
+      - name: Lint the core
+        working-directory: common/core
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test the core
+        working-directory: common/core
+        run: cargo test --locked
+      # The core must keep building without an operating system (ESP32, Zephyr).
+      - name: Build the core for a microcontroller
+        working-directory: common/core
+        run: cargo build --locked --target thumbv7em-none-eabihf
+      - name: Lint the WebAssembly bindings
+        working-directory: client/web/wasm
+        run: cargo clippy --locked --target wasm32-unknown-unknown -- -D warnings
+      - name: Install wasm-bindgen
+        run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
+      - name: Build the web app
+        working-directory: client/web
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+
   test:
-    name: Test
+    name: Server
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -48,7 +84,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      # The version comes from server/rust-toolchain.toml.
+      # The version comes from rust-toolchain.toml.
       - name: Install the Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -67,7 +103,7 @@ jobs:
   # is arm64, and compiling Rust under emulation takes most of an hour.
   image:
     name: Image (${{ matrix.arch }})
-    needs: test
+    needs: [core, test]
     strategy:
       matrix:
         include:
@@ -92,7 +128,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          context: server
+          context: .
           platforms: linux/${{ matrix.arch }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ env.IMAGE }}:${{ github.sha }}-${{ matrix.arch }}

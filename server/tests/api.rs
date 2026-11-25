@@ -618,3 +618,39 @@ async fn cleanup_removes_expired_rows_and_old_deletion_markers() {
     let (status, _) = app.call(Method::GET, &path, Some(poll_token), None).await;
     assert_ne!(status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn web_app_is_served_with_a_strict_content_security_policy() {
+    let web = tempfile::tempdir().unwrap();
+    std::fs::write(web.path().join("index.html"), "<!doctype html><title>Notes</title>").unwrap();
+    let dir = web.path().to_path_buf();
+    let app = app_with(move |config| config.server.static_dir = Some(dir)).await;
+
+    let (status, headers, body) = app.send(None, Method::GET, "/app/", None, &[], Body::empty()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.starts_with(b"<!doctype html>"));
+    let csp = headers["content-security-policy"].to_str().unwrap();
+    assert!(csp.starts_with("default-src 'none'; script-src 'self' 'wasm-unsafe-eval';"));
+    assert!(csp.contains("require-trusted-types-for 'script'"));
+    assert!(!csp.contains("unsafe-inline"));
+    assert_eq!(headers["cache-control"], "no-cache");
+    assert_eq!(headers["x-frame-options"], "DENY");
+    assert_eq!(headers["cross-origin-opener-policy"], "same-origin");
+
+    // Relative URLs in the page only work below "/app/".
+    for (path, expected) in [("/app", StatusCode::PERMANENT_REDIRECT), ("/", StatusCode::TEMPORARY_REDIRECT)] {
+        let (status, headers, _) = app.send(None, Method::GET, path, None, &[], Body::empty()).await;
+        assert_eq!(status, expected, "{path}");
+        assert_eq!(headers["location"], "/app/");
+    }
+
+    // Files outside the directory are out of reach.
+    for path in ["/app/../Cargo.toml", "/app/%2e%2e/Cargo.toml", "/app/missing.js"] {
+        let (status, _, _) = app.send(None, Method::GET, path, None, &[], Body::empty()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
+
+    // The API itself may load nothing at all.
+    let (_, headers, _) = app.send(None, Method::GET, "/healthz", None, &[], Body::empty()).await;
+    assert_eq!(headers["content-security-policy"], "default-src 'none'; frame-ancestors 'none'");
+}

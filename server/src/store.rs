@@ -187,6 +187,14 @@ pub struct Store {
     pool: AnyPool,
 }
 
+impl Store {
+    /// Direct database access, for tests that play a dishonest server.
+    #[doc(hidden)]
+    pub fn pool(&self) -> &AnyPool {
+        &self.pool
+    }
+}
+
 fn is_unique_violation(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())
 }

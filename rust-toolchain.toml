@@ -1,0 +1,9 @@
+# One compiler version for local builds, CI and the Docker image (keep the
+# FROM line of server/Dockerfile in step), so that a new lint or compiler
+# change never breaks the build by surprise.
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]
+# wasm32: the web app. thumbv7em: only to prove that the core builds without
+# an operating system, as the embedded device needs.
+targets = ["wasm32-unknown-unknown", "thumbv7em-none-eabihf"]

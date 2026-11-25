@@ -8,6 +8,8 @@ data:
     [server]
     listen = "0.0.0.0:8080"
     data_dir = "/data"
+    # The web app that is built into the image, served at /app/.
+    static_dir = "/usr/share/notes-web"
     # Traefik terminates TLS (see routes.yaml), the pod speaks plain HTTP
     # inside the cluster.
     allow_plain_http = true
