@@ -1028,3 +1028,132 @@ dialog::backdrop {
     animation: none;
   }
 }
+
+/* ---- lists: room for the ring around the selected entry, which the
+   scrolling box would otherwise cut off */
+
+.folders,
+.notes {
+  padding-top: 3px;
+  padding-bottom: 3px;
+  scroll-padding: 3px;
+}
+
+.notes {
+  padding-bottom: 1rem;
+}
+
+/* ---- blocks and pictures with text around them */
+
+.blocks {
+  display: flow-root;
+  flex-shrink: 0;
+}
+
+.block.wrap-left {
+  float: left;
+  margin: 0.2rem 1.4rem 0.6rem 0;
+}
+
+.block.wrap-right {
+  float: right;
+  margin: 0.2rem 0 0.6rem 1.4rem;
+}
+
+.block.wrap-left .media,
+.block.wrap-right .media {
+  margin: 0;
+}
+
+.media.align-wrap-right .resize {
+  right: auto;
+  left: -5px;
+  cursor: nesw-resize;
+}
+
+.block .grip {
+  top: 0.35rem;
+  left: -1.2rem;
+  line-height: 0;
+}
+
+/* ---- the toolbar floating on a picture */
+
+.media .toolbar {
+  position: absolute;
+  top: 0.6rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--raised) 88%, transparent);
+  backdrop-filter: blur(10px);
+  box-shadow: var(--shadow), 0 0 0 1px color-mix(in srgb, var(--line) 70%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.block:hover .toolbar,
+.block:focus-within .toolbar {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.media .toolbar button {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text);
+}
+
+.media .toolbar button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.media .toolbar button[aria-pressed="true"] {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: var(--accent-text);
+}
+
+.media .toolbar button:disabled {
+  opacity: 0.35;
+}
+
+.media .toolbar .rule {
+  width: 1px;
+  height: 1.2rem;
+  margin: 0 3px;
+  background: var(--line);
+}
+
+/* A narrow picture: the toolbar keeps its size and may stick out. */
+.media.visual {
+  min-width: 0;
+}
+
+button.icon {
+  display: inline-grid;
+  place-items: center;
+}
+
+/* On a narrow picture the toolbar breaks into rows instead of sticking out. */
+.media .toolbar {
+  max-width: calc(100% - 0.6rem);
+  flex-wrap: wrap;
+  justify-content: center;
+  border-radius: 1.4rem;
+  width: max-content;
+}
+
+.editor {
+  overflow-x: hidden;
+}
