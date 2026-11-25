@@ -26,7 +26,7 @@ export function Welcome({ app }: { app: AppViewModel }) {
         <img className="mascot" src={hero} alt="" />
       <form className="card" onSubmit={submit} autoComplete="off">
         <h1 className="brand">
-          Notes <span aria-hidden="true">✿</span>
+          Notes <span className="seal" aria-hidden="true">記</span>
         </h1>
         <p className="muted">Okaeri! Your notes are end-to-end encrypted and readable on your devices only.</p>
 

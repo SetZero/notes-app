@@ -106,7 +106,7 @@ export function Workspace({ workspace }: { workspace: WorkspaceViewModel }) {
       <aside className="sidebar">
         <header>
           <h1 className="brand">
-            Notes <span aria-hidden="true">✿</span>
+            Notes <span className="seal" aria-hidden="true">記</span>
           </h1>
           <span className={`pill ${sync.phase}`} title={sync.problem ?? undefined}>
             {syncLabel(sync)}
@@ -186,7 +186,7 @@ export function Workspace({ workspace }: { workspace: WorkspaceViewModel }) {
               </button>
             </li>
           ))}
-          {notes.length === 0 && <li className="muted empty">{state.query ? "No note matches." : "No notes yet. Write the first one ✿"}</li>}
+          {notes.length === 0 && <li className="muted empty">{state.query ? "No note matches." : "No notes yet. Write the first one"}</li>}
         </ul>
       </aside>
 
@@ -199,7 +199,7 @@ export function Workspace({ workspace }: { workspace: WorkspaceViewModel }) {
         ) : (
           <div className="placeholder">
             <img src={empty} alt="" />
-            <p className="muted">Pick a note, or start a new one ✿</p>
+            <p className="muted">Pick a note, or start a new one</p>
           </div>
         )}
       </section>

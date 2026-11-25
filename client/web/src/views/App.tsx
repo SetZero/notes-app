@@ -34,7 +34,7 @@ export function App({ app }: { app: AppViewModel }) {
       return (
         <main className="center scenic">
           <div className="card wide">
-            <h1>Your recovery kit ✿</h1>
+            <h1>Your recovery kit</h1>
             <p>
               Write these down and keep them somewhere safe. They are the only way to open your notes on a new device, and nobody can
               restore them for you: the server never sees them.
