@@ -1,0 +1,150 @@
+@startuml 03-server-internal-interfaces
+title Interface 03 - Server internal interfaces (Rust traits)
+
+skinparam shadowing false
+skinparam defaultFontName sans-serif
+skinparam classAttributeIconSize 0
+hide empty members
+
+interface Store {
+  create_account(verifier_hash, device) : (AccountId, DeviceId)
+  recovery_verifier_hash(account) : Hash
+  insert_device(account, name, token_hash) : DeviceId
+  find_device_by_token_hash(hash) : DeviceContext?
+  list_devices(account) : DeviceRow[]
+  revoke_device(account, device)
+  touch_device(device, cursor, now)
+  ..
+  upsert_blocks(account, origin, blocks, now) : UpsertOutcome[]
+  changes_since(account, cursor, limit, max_bytes) : ChangeSlice
+  oldest_available_cursor(account) : Seq
+  ..
+  create_pairing(row) : PairingId
+  claim_pairing(channel, account) : PairingRow?
+  approve_pairing(id, account, pake_msg, wrapped, device) : bool
+  take_pairing(id, poll_token_hash) : PairingRow?
+  ..
+  blob_exists(account, hash) : bool
+  insert_blob(account, hash, size)
+  ..
+  gc_tombstones(now) : int
+  gc_pairings(now) : int
+}
+
+interface BlobStore {
+  exists(account, hash) : bool
+  put(account, hash, stream, max_bytes) : PutOutcome
+  get(account, hash, range) : ByteStream
+  size(account, hash) : int
+  delete(account, hash)
+}
+
+interface EventHub {
+  subscribe(account) : Stream<Seq>
+  publish(account, seq)
+}
+
+interface Authenticator {
+  authenticate(bearer) : DeviceContext
+  authenticate_poll(pairing_id, bearer) : PairingId
+}
+
+interface RateLimiter {
+  check(key, class) : Allowed | RetryAfter
+}
+
+interface Clock {
+  now() : Timestamp
+}
+
+class DeviceContext {
+  account_id : AccountId
+  device_id : DeviceId
+}
+
+class UpsertOutcome {
+  block_id : BlockId
+  status : Accepted | Duplicate | Stale | Rejected
+  seq : Seq?
+  reason : RejectReason?
+}
+
+class ChangeSlice {
+  blocks : StoredBlock[]
+  next_cursor : Seq
+  has_more : bool
+}
+
+class AccountService
+class PairingService
+class DeviceService
+class ChangeService
+class BlobService
+class GcJob
+class SqlStore {
+  connect(database_url) : SqlStore
+  migrate()
+}
+interface SqlDialect {
+  placeholder(n) : string
+  uuid_param(id) : Param
+  bool_param(b) : Param
+  version_collation() : string
+  migrations() : Migration[]
+}
+class SqliteDialect
+class PostgresDialect
+class FsBlobStore
+class MemoryEventHub
+
+SqlStore ..|> Store
+SqlStore --> SqlDialect
+SqliteDialect ..|> SqlDialect
+PostgresDialect ..|> SqlDialect
+
+note bottom of SqlDialect
+  The only place that knows which database is used.
+  Adding another SQL database means one more
+  dialect class and one more set of migrations.
+  Store, the services and the REST API do not change.
+end note
+FsBlobStore ..|> BlobStore
+MemoryEventHub ..|> EventHub
+
+AccountService --> Store
+AccountService --> RateLimiter
+PairingService --> Store
+PairingService --> RateLimiter
+DeviceService --> Store
+ChangeService --> Store
+ChangeService --> EventHub
+ChangeService --> Clock
+BlobService --> BlobStore
+BlobService --> Store
+GcJob --> Store
+GcJob --> BlobStore
+GcJob --> Clock
+Authenticator --> Store
+
+Store ..> DeviceContext
+Store ..> UpsertOutcome
+Store ..> ChangeSlice
+
+note right of Store
+  upsert_blocks runs in one transaction:
+  compare versions, write rows, assign seq.
+  Every method is scoped by account,
+  so one account can never read another's rows.
+end note
+
+note right of RateLimiter
+  Classes: account_create, recover, pairing_create,
+  pairing_claim (per IP), sync and blob (per device).
+end note
+
+note bottom of Clock
+  Injected so tests can control time
+  (clock skew rule, pairing expiry, GC).
+end note
+
+@enduml

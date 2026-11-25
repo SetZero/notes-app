@@ -1,0 +1,71 @@
+@startuml 05-client-sync-state
+title Protocol 05 - Client sync state machine (SyncEngine)
+
+skinparam shadowing false
+skinparam defaultFontName sans-serif
+
+[*] --> Unpaired
+
+state "Unpaired" as Unpaired
+state "Pairing" as Pairing
+state "Idle" as Idle
+state "Pulling" as Pulling
+state "Pushing" as Pushing
+state "Backoff" as Backoff
+state "Offline" as Offline
+state "Resyncing" as Resyncing
+state "AuthFailed" as AuthFailed
+
+Unpaired --> Pairing : user starts setup or pairing
+Pairing --> Unpaired : expired, cancelled\nor key unwrap failed
+Pairing --> Pulling : token and account key stored
+
+Idle --> Pulling : poll timer, event "changed",\napp start or wake, local change
+Pulling --> Pulling : has_more = true
+Pulling --> Pushing : has_more = false\nand outbox not empty
+Pulling --> Idle : has_more = false\nand outbox empty
+Pushing --> Pushing : outbox not empty
+Pushing --> Idle : outbox empty
+
+Pulling --> Backoff : 429, 5xx, timeout
+Pushing --> Backoff : 429, 5xx, timeout
+Backoff --> Pulling : delay elapsed
+
+Pulling --> Offline : no network
+Pushing --> Offline : no network
+Idle --> Offline : network lost
+Offline --> Pulling : network available
+
+Pulling --> Resyncing : 410 cursor_expired
+Resyncing --> Pushing : full pull done,\nlocal store reconciled
+Resyncing --> Backoff : 429, 5xx, timeout
+
+Pulling --> AuthFailed : 401
+Pushing --> AuthFailed : 401
+Resyncing --> AuthFailed : 401
+AuthFailed --> Pairing : user pairs again
+
+note right of Idle
+  Local edits always succeed, in every state.
+  They go to the local store and the outbox.
+  Sync is never on the path of a keystroke.
+end note
+
+note right of Backoff
+  delay = min(15 min, 2 s * 2^attempt) with jitter.
+  Retry-After from the server overrides it.
+  attempt resets after one successful request.
+end note
+
+note left of AuthFailed
+  Local notes stay readable and editable.
+  The outbox is kept and pushed after re-pairing.
+end note
+
+note left of Pulling
+  A pull always runs before a push,
+  so the device merges remote changes
+  before it uploads its own.
+end note
+
+@enduml

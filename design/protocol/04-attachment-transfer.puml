@@ -1,0 +1,69 @@
+@startuml 04-attachment-transfer
+title Protocol 04 - Attachment upload and download
+
+skinparam shadowing false
+skinparam defaultFontName sans-serif
+autonumber
+
+participant "Device A\n(core)" as a
+participant "Sync server" as srv
+participant "Device B\n(core)" as b
+
+note over a, b
+  Attachments never travel inside JSON.
+  They are encrypted on the device, addressed by the SHA-256
+  of the ciphertext, and referenced from an attachment block.
+end note
+
+== Upload (before the referencing block is pushed) ==
+
+a -> a : blob_key = 256-bit random\nencrypt file in 64 KiB chunks (AES-256-GCM,\nnonce = prefix | chunk counter | last-chunk flag)\nhash = SHA-256(ciphertext)
+
+a -> srv : HEAD /v1/blobs/:hash
+alt already stored
+  srv --> a : 200
+else not stored
+  srv --> a : 404
+  a -> srv : PUT /v1/blobs/:hash\nContent-Type: application/octet-stream\nContent-Length: <size>\n<ciphertext stream>
+  srv -> srv : stream to temp file, hash while writing\nenforce max_blob_bytes
+  alt hash matches and size within limit
+    srv -> srv : move into blob directory, insert row
+    srv --> a : 201
+  else hash mismatch
+    srv --> a : 422 problem "hash_mismatch"
+  else too large
+    srv --> a : 413 problem "blob_too_large"
+  end
+end
+
+a -> a : attachment block payload =\n{ hash, blob_key, size, mime, name }
+a -> srv : POST /v1/changes (attachment block, encrypted as usual)
+srv --> a : 200 { results }
+
+== Download (lazy, when the note is opened) ==
+
+b -> srv : GET /v1/changes?since=...
+srv --> b : attachment block
+b -> b : decrypt block, read hash and blob_key
+
+b -> srv : GET /v1/blobs/:hash\nRange: bytes=<offset>- (optional, for resume)
+srv --> b : 200 or 206\n<ciphertext stream>
+b -> b : verify SHA-256 while streaming to storage\ndecrypt chunk by chunk when displayed
+
+alt hash mismatch after download
+  b -> b : delete file, retry later, report if repeated
+end
+
+note over b
+  On the ESP32 the download streams straight to flash
+  in 64 KiB chunks, so memory use is constant
+  regardless of attachment size.
+end note
+
+note over srv
+  GcJob removes blobs that are older than 30 days and that
+  no device has requested, only after a client-driven
+  "unreferenced" list exists. Until then blobs are kept.
+end note
+
+@enduml

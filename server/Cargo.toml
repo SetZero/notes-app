@@ -1,0 +1,40 @@
+[package]
+name = "notes-syncd"
+version = "0.1.0"
+edition = "2021"
+description = "Self-hosted sync server for the notes app. Stores and relays ciphertext only."
+
+[dependencies]
+axum = { version = "0.8", features = ["macros"] }
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+rustls-pemfile = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
+tower-http = { version = "0.6", features = ["timeout", "set-header", "fs"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "sqlite", "postgres", "any"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+subtle = "2"
+base64 = "0.22"
+getrandom = "0.3"
+jsonwebtoken = "9"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+time = { version = "0.3", features = ["formatting"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tempfile = "3"
+ring = "0.17"
+
+[profile.release]
+overflow-checks = true
+panic = "abort"

@@ -1,0 +1,105 @@
+@startuml 02-server-components
+title Architecture 02 - Sync server components (notes-syncd)
+
+skinparam shadowing false
+skinparam componentStyle rectangle
+skinparam defaultFontName sans-serif
+skinparam rectangle {
+  BackgroundColor<<http>> #E8EAF0
+  BackgroundColor<<services>> #DCEBFA
+  BackgroundColor<<ports>> #C9EFE3
+  BackgroundColor<<storage>> #FCE6C8
+}
+
+actor "Client core" as client
+
+rectangle "HTTP layer (requests pass left to right)" as g_http <<http>> {
+  component "TLS listener\nrustls, TLS 1.3" as tls
+  component "Request limits\nbody size, timeouts" as limits
+  component "Rate limiter\nper IP, per device" as ratelimit
+  component "Auth\nbearer token" as auth
+  component "Router\n/v1/..." as router
+  component "Problem mapper\nRFC 9457 errors" as problems
+}
+
+rectangle "Services (one per API area)" as g_services <<services>> {
+  component "AccountService\ncreate, recover" as accounts
+  component "PairingService\nSPAKE2 relay" as pairing
+  component "DeviceService\nlist, revoke" as devices
+  component "ChangeService\npush, pull" as changes
+  component "BlobService\nupload, download" as blobsvc
+  component "OidcVerifier\nID tokens, e.g. Keycloak" as oidc
+  component "EventHub\nin memory" as events
+  component "GcJob\nbackground cleanup" as gc
+}
+
+rectangle "Storage traits" as g_ports <<ports>> {
+  component "Store" as store_if
+  component "BlobStore" as blob_if
+}
+
+rectangle "Storage implementations" as g_impl <<storage>> {
+  component "SqlStore\nportable SQL" as sqlstore
+  component "SQLite dialect\n+ migrations" as d_sqlite
+  component "Postgres dialect\n+ migrations" as d_pg
+  component "FsBlobStore" as fsblob
+}
+
+database "SQLite (WAL)\ndefault" as db
+database "Postgres\noptional" as pg
+folder "Blob directory" as blobdir
+
+' layout inside the groups (invisible)
+tls -[hidden]right- limits
+limits -[hidden]right- ratelimit
+ratelimit -[hidden]right- auth
+auth -[hidden]right- router
+router -[hidden]right- problems
+accounts -[hidden]right- pairing
+pairing -[hidden]right- devices
+devices -[hidden]right- changes
+changes -[hidden]right- blobsvc
+blobsvc -[hidden]right- oidc
+oidc -[hidden]right- events
+events -[hidden]right- gc
+store_if -[hidden]right- blob_if
+sqlstore -[hidden]right- d_sqlite
+d_sqlite -[hidden]right- d_pg
+d_pg -[hidden]right- fsblob
+
+' dependencies between groups only
+client -down-> g_http : HTTPS
+g_http -down-> g_services : authenticated request\nwith DeviceContext
+g_services -down-> g_ports
+g_ports -down-> g_impl : implemented by
+d_sqlite -down-> db
+d_pg -down-> pg
+fsblob -down-> blobdir
+
+legend right
+  HTTP layer
+  Auth looks up SHA-256(token) through Store. Tokens are 256-bit random.
+  No token needed: /healthz, /v1/meta, POST /v1/accounts, POST /v1/pairings,
+  POST /v1/accounts/:id/recover, POST /v1/auth/oidc/nonce. Poll token: GET /v1/pairings/:id.
+
+  Services
+  ChangeService keeps only the newest version of each block, assigns the
+  per-account sequence number in one transaction, and publishes to EventHub.
+  It never inspects ciphertext.
+  EventHub state is in memory. After a restart clients reconnect and pull.
+  Several server instances on Postgres would need a shared hub (LISTEN / NOTIFY).
+  GcJob removes tombstones, expired pairings and expired nonces.
+  OidcVerifier checks ID tokens against the provider's published keys:
+  asymmetric algorithms only, exact issuer and audience, expiry, age,
+  and a single-use nonce issued by this server. It is used at account
+  creation and recovery; afterwards devices use their own tokens.
+
+  Storage
+  Services only know the Store and BlobStore traits.
+  The database is chosen by the connection URL in the config (sqlite: or postgres:).
+  SqlStore is written once, using only SQL both databases share.
+  A dialect holds the few differences and its own migrations.
+  Adding another SQL database means adding one dialect.
+end legend
+
+@enduml

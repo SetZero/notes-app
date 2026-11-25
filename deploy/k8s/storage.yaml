@@ -1,0 +1,16 @@
+# All server state: the SQLite database and the encrypted attachments.
+# Everything in it is ciphertext or a hash, but losing it loses the sync
+# history of every account, so include it in backups.
+#
+# local-path volumes stay on the node they were created on.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: notes-syncd-data
+  namespace: notes
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi

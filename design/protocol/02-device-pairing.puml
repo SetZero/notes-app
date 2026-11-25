@@ -1,0 +1,68 @@
+@startuml 02-device-pairing
+title Protocol 02 - Pairing an additional device (SPAKE2, RFC 9382)
+
+skinparam shadowing false
+skinparam defaultFontName sans-serif
+autonumber
+
+actor "User" as user
+participant "New device\n(e.g. ESP32)" as new
+participant "Sync server" as srv
+participant "Existing device\n(has account key AK)" as old
+
+note over new, old
+  Goal: give the new device a token and the account key AK
+  without the server being able to learn AK.
+  The pairing code has two parts: channel (public, routes the request)
+  and secret (never sent to the server, used as the SPAKE2 password).
+end note
+
+user -> new : "Add this device", enter server URL
+new -> new : secret = 8 random base32 characters\npake_a = SPAKE2 start (side A, password = secret)
+new -> srv : POST /v1/pairings\n{ device_name, pake_msg: pake_a }
+srv -> srv : create pairing, state = pending\nexpires in 5 minutes
+srv --> new : 201 { pairing_id, channel, poll_token, expires_in }
+new --> user : show code "channel-secret"\nas text and as QR code
+
+user -> old : type or scan the code
+old -> srv : POST /v1/pairings/claim\nAuthorization: Bearer token\n{ channel }
+srv -> srv : state = claimed, bind to caller's account
+srv --> old : 200 { pairing_id, device_name, pake_msg: pake_a }
+
+old --> user : "Add device <device_name>?"
+user -> old : confirm
+
+old -> old : pake_b = SPAKE2 start (side B, password = secret)\nK = SPAKE2 finish(pake_a)\nwrapped = AES-256-GCM(K, { account_id, AK })
+old -> srv : POST /v1/pairings/:pairing_id/approve\nAuthorization: Bearer token\n{ pake_msg: pake_b, wrapped_account_key }
+srv -> srv : store pake_b and wrapped key\nstate = approved
+srv --> old : 204
+
+loop every 2 s until approved or expired
+  new -> srv : GET /v1/pairings/:pairing_id\nAuthorization: Bearer poll_token
+  srv --> new : 200 { state: "pending" | "claimed" }
+end
+
+new -> srv : GET /v1/pairings/:pairing_id\nAuthorization: Bearer poll_token
+srv -> srv : in one transaction: delete pairing row,\ncreate device, token = 256-bit random, store hash
+srv --> new : 200 { state: "approved", account_id, device_id,\ntoken, pake_msg: pake_b, wrapped_account_key }
+
+new -> new : K = SPAKE2 finish(pake_b)\nopen wrapped_account_key with K
+
+alt decryption succeeds and account_id matches
+  new -> new : SecureStore: put AK, token, ids
+  new --> user : "Paired"
+  new -> srv : first sync from cursor 0
+else decryption fails (wrong code or tampering)
+  new -> srv : DELETE /v1/devices/:device_id\nAuthorization: Bearer token
+  new -> new : discard token
+  new --> user : "Pairing failed, try again"
+end
+
+note over srv
+  What a malicious server can do: guess the secret once per pairing.
+  A wrong guess makes decryption fail on the new device.
+  A pairing can be claimed once, and only the claiming account can approve it.
+  The device and its token are created when the new device polls.
+end note
+
+@enduml

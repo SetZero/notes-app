@@ -1,0 +1,97 @@
+@startuml 03-sync-cycle
+title Protocol 03 - Sync cycle (pull, merge, push)
+
+skinparam shadowing false
+skinparam defaultFontName sans-serif
+autonumber
+
+participant "Shell" as shell
+participant "Core\n(SyncEngine)" as core
+database "Local store" as local
+participant "Sync server" as srv
+database "Server store" as sdb
+
+note over core, srv
+  Every request: HTTPS (TLS 1.3), Authorization: Bearer <device token>.
+  Trigger: local change (debounced), poll timer, event stream, app start or wake.
+end note
+
+== Pull ==
+
+loop until has_more = false
+  core -> srv : GET /v1/changes?since=<cursor>&limit=<n>&max_bytes=<b>
+  srv -> sdb : blocks with seq > cursor, ordered by seq\nupdate device.last_cursor
+  srv --> core : 200 { changes: [BlockEnvelope], next_cursor, has_more }
+
+  loop for each envelope
+    alt origin_device_id is this device
+      core -> core : skip (own echo)
+    else
+      core -> core : note_key = HKDF(AK, note_id)\nAAD = "notes/v1" | block_id | note_id | version | deleted\ndecrypt and authenticate
+      alt authentication fails
+        core -> core : drop block, log, report "tampered block"
+      else local version < remote version
+        core -> local : replace block with remote\nremove it from outbox if present
+      else local version >= remote version
+        core -> core : keep local block
+      end
+      core -> core : HybridClock.observe(remote version)
+    end
+  end
+
+  core -> local : commit page and next_cursor in one transaction
+end
+
+core --> shell : updated view models
+
+== Push ==
+
+loop while outbox is not empty
+  core -> local : take up to n blocks from outbox
+  core -> core : encrypt each block with a fresh random nonce
+  core -> srv : POST /v1/changes\n{ changes: [BlockUpload] }
+
+  srv -> sdb : begin transaction
+  loop for each block
+    alt version time > server time + 10 min
+      srv -> srv : result = rejected (clock_skew)
+    else no stored row, or version > stored version
+      srv -> sdb : upsert block, seq = account.next_seq++
+      srv -> srv : result = accepted (seq)
+    else version = stored version
+      srv -> srv : result = duplicate (stored seq)
+    else version < stored version
+      srv -> srv : result = stale
+    end
+  end
+  srv -> sdb : commit
+  srv -> srv : EventHub.publish(account, latest seq)
+  srv --> core : 200 { results: [PushResult] }
+
+  core -> local : remove accepted, duplicate and stale blocks from outbox
+  note right of core
+    stale: a newer version exists on the server.
+    It arrives with the next pull and wins locally too.
+    rejected: keep in outbox, fix the clock, report to the user.
+  end note
+end
+
+== Failure handling ==
+
+alt 401 unauthorized
+  core -> core : stop syncing, state = AuthFailed\n(device was revoked, pair again)
+else 410 cursor_expired
+  core -> core : full resync from cursor 0,\nthen delete local blocks that are neither\non the server nor in the outbox
+else 429 or 5xx or network error
+  core -> core : exponential backoff with jitter,\nhonour Retry-After, max 15 min
+else 413 payload too large
+  core -> core : halve batch size and retry
+end
+
+== Change notification (optional, not on ESP32) ==
+
+core -> srv : GET /v1/events\nAccept: text/event-stream
+srv --> core : event: changed\ndata: { "cursor": 1234 }
+core -> core : if cursor > local cursor: start a pull
+
+@enduml

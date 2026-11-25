@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notes-syncd
+  namespace: notes
+  labels:
+    app: notes-syncd
+spec:
+  # One replica: SQLite has a single writer and change notifications are kept
+  # in memory. More replicas need Postgres and a shared event hub.
+  replicas: 1
+  strategy:
+    # The volume is ReadWriteOnce, so the old pod has to go before the new
+    # one can start.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: notes-syncd
+  template:
+    metadata:
+      labels:
+        app: notes-syncd
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: notes-syncd
+          # CI replaces this with the exact image digest it just built.
+          image: ghcr.io/setzero/notes-syncd:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: NOTES_SYNCD_INVITE_CODE
+              valueFrom:
+                secretKeyRef:
+                  name: notes-syncd-invite
+                  key: invite-code
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/notes-syncd
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: notes-syncd-data
+        - name: config
+          configMap:
+            name: notes-syncd-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notes-syncd
+  namespace: notes
+spec:
+  type: ClusterIP
+  selector:
+    app: notes-syncd
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

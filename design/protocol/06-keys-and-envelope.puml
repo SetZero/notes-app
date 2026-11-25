@@ -1,0 +1,93 @@
+@startuml 06-keys-and-envelope
+title Protocol 06 - Key hierarchy and block encryption
+
+skinparam shadowing false
+skinparam defaultFontName sans-serif
+skinparam classAttributeIconSize 0
+hide circle
+hide empty members
+
+class "Account key (AK)" as ak <<secret>> {
+  256-bit random, created on the first device
+  stored in the platform SecureStore
+  backed up as a 24-word recovery phrase
+  reaches other devices only via pairing
+}
+
+class "Note key" as nk <<derived>> {
+  {field} HKDF-SHA256(AK, info = "notes/v1/note" | note_id)
+  one per note, recomputed on demand
+}
+
+class "Recovery verifier" as rv <<derived>> {
+  {field} HKDF-SHA256(AK, info = "notes/v1/recovery")
+  server stores SHA-256 of it
+}
+
+class "Blob key" as bk <<secret>> {
+  256-bit random, one per attachment
+  stored inside the attachment block payload
+}
+
+class "Pairing key (K)" as pk <<ephemeral>> {
+  SPAKE2 output, lives for one pairing
+  wraps { account_id, AK } for the new device
+}
+
+class "Device token" as tok <<secret>> {
+  256-bit random, issued by the server
+  authenticates the device, encrypts nothing
+  server stores SHA-256 of it
+}
+
+class "BlockPayload (plaintext)" as payload {
+  schema : 1
+  kind : header | paragraph | heading | todo | code | attachment
+  order : fractional index string
+  text : string
+  attrs : map
+}
+
+class "BlockEnvelope (on the wire and on the server)" as env {
+  block_id : uuid
+  note_id : uuid
+  version : hybrid logical clock string
+  deleted : bool
+  nonce : 12 random bytes
+  {field} ciphertext : AES-256-GCM(note key, nonce, payload, AAD)
+}
+
+class "AAD (authenticated, not encrypted)" as aad {
+  "notes/v1" | block_id | note_id | version | deleted
+}
+
+ak --> nk : derives
+ak --> rv : derives
+nk --> env : encrypts
+payload --> env : becomes ciphertext
+aad --> env : bound into the tag
+payload --> bk : attachment block carries
+pk ..> ak : transports once
+
+note right of aad
+  Because ids, version and the deleted flag are bound
+  into the authentication tag, the server cannot
+  move a ciphertext to another block or note,
+  replay it under a different version,
+  or turn a block into a tombstone or back.
+end note
+
+note bottom of env
+  version format, 24 characters, compared bytewise:
+  12 hex digits unix time in ms
+  4 hex digits counter
+  8 hex digits device tag
+  A tombstone has deleted = true and an empty payload.
+end note
+
+note bottom of nk
+  Random 96-bit nonces are safe here because each key
+  only encrypts the blocks of one note.
+end note
+
+@enduml

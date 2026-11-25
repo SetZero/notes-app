@@ -1,0 +1,6 @@
+# Secrets never belong in this repository.
+*.pem
+*.key
+kubeconfig*
+*-secret.yaml
+.env

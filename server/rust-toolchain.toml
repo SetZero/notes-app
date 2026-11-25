@@ -1,0 +1,6 @@
+# One compiler version for local builds, CI and the Docker image (keep the
+# FROM line of the Dockerfile in step), so that a new lint or compiler change
+# never breaks the build by surprise.
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]

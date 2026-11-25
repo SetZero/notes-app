@@ -1,0 +1,77 @@
+@startuml 01-system-context
+title Architecture 01 - System context and deployment
+
+skinparam shadowing false
+skinparam componentStyle rectangle
+skinparam defaultFontName sans-serif
+skinparam rectangle {
+  BackgroundColor<<shared>> #DCEBFA
+  BackgroundColor<<apps>> #FFFFFF
+}
+skinparam component {
+  BackgroundColor<<shared>> #FFFFFF
+  BackgroundColor<<webonly>> #E6F4D8
+  BackgroundColor<<platform>> #FCE6C8
+}
+
+actor "User" as user
+
+rectangle "Shared code: one source tree, written once" as g_shared <<shared>> {
+  component "Slint shell\nUI for desktop, Android, device" as shell <<shared>>
+  component "Core (Rust, no_std + alloc)\nall behaviour, see 05-layer-model" as core <<shared>>
+}
+
+rectangle "Apps: four builds of the shared code, each adds only what is listed" as g_apps <<apps>> {
+  node "Desktop app\nWindows / Linux" as desktop {
+    component "HAL adapter:\ndesktop" as d_hal <<platform>>
+  }
+  node "Android app" as android {
+    component "HAL adapter:\nAndroid" as a_hal <<platform>>
+  }
+  node "Device: Zephyr on ESP32-P4\n1024x600 touch, ESP32-C6 radio" as esp {
+    component "HAL adapter:\nZephyr" as e_hal <<platform>>
+  }
+  node "Web app (browser)\ncore as WASM, no Slint shell" as browser {
+    component "DOM shell" as w_shell <<webonly>>
+    component "HAL adapter:\nweb" as w_hal <<platform>>
+  }
+}
+
+cloud "Self-hosted" as hosting {
+  node "Sync server host" as host {
+    component "notes-syncd\n(Rust, single binary)" as syncd
+    database "SQL database\nSQLite (default) or Postgres\nmetadata + encrypted blocks" as s_db
+    folder "Blob directory\nencrypted attachments" as s_blobs
+    component "Static web app files" as s_static
+    syncd --> s_db
+    syncd --> s_blobs
+    syncd --> s_static
+  }
+}
+
+' layout inside the groups (invisible)
+shell -[hidden]right- core
+d_hal -[hidden]right- a_hal
+a_hal -[hidden]right- e_hal
+e_hal -[hidden]right- w_shell
+w_shell -[hidden]right- w_hal
+
+user -down-> g_apps : uses any of them
+g_shared -down-> g_apps : compiled into every app
+g_apps -down-> syncd : HTTPS (TLS 1.3)\nREST + JSON
+
+legend right
+  |<#DCEBFA>  shared  | exists once, compiled into every app |
+  |<#FCE6C8>  platform  | thin HAL adapter, the only per-platform code |
+  |<#E6F4D8>  web only  | second UI, because Slint is canvas-only on the web |
+
+  The web app is served by the sync server, so it talks to the same origin.
+  The device differs only in limits: smaller pages, polling instead of events.
+  Its adapter targets Zephyr, not the chip, so other Zephyr boards can reuse it.
+
+  Trust boundary: the server is an untrusted relay that stores ciphertext only.
+  Visible to it: account and device ids, block ids, note ids, versions, sizes, timing.
+  Never visible: note content, titles, tags, account key, attachment content.
+end legend
+
+@enduml

@@ -1,0 +1,9 @@
+# Its own namespace, so that the access CI gets (ci-access.yaml) cannot touch
+# anything else in the cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: notes
+  labels:
+    name: notes
+    pod-security.kubernetes.io/enforce: restricted

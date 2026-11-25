@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notes-syncd-config
+  namespace: notes
+data:
+  config.toml: |
+    [server]
+    listen = "0.0.0.0:8080"
+    data_dir = "/data"
+    # Traefik terminates TLS (see routes.yaml), the pod speaks plain HTTP
+    # inside the cluster.
+    allow_plain_http = true
+    # Whose X-Forwarded-For is believed. Rate limits are per client address,
+    # so without this every client would share the address of Traefik and one
+    # abusive client could lock everybody out. This is the k3s default pod
+    # network; change it if the cluster uses another range
+    # (kubectl get nodes -o jsonpath="{.items[*].spec.podCIDR}").
+    trusted_proxies = ["10.42.0.0/16"]
+
+    [enrollment]
+    # "invite": new accounts need the code from the notes-syncd-invite secret.
+    # Switch to "either" or "oidc" after adding a provider below.
+    mode = "invite"
+
+    # Sign-in with the Keycloak on this cluster. Create a public client with
+    # the standard flow and PKCE in the realm first, then fill in realm and
+    # client id and uncomment.
+    # [[oidc]]
+    # id = "keycloak"
+    # issuer = "https://keycloak.magical.rocks/realms/<realm>"
+    # client_id = "notes-app"
+    # algorithms = ["RS256"]
+    # Optional: only members of a group or role may create accounts.
+    # required_claim = { name = "groups", value = "notes" }

@@ -1,0 +1,169 @@
+# Test, build the image, deploy.
+#
+#   pull request   test, and build the image without publishing it
+#   push to main   test, publish ghcr.io/setzero/notes-syncd, roll it out
+#
+# Third-party actions are pinned to commit hashes: a moved tag cannot change
+# what runs here with access to the registry and the cluster.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/setzero/notes-syncd
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: server
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: ci-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      # The version comes from server/rust-toolchain.toml.
+      - name: Install the Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: server
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test with SQLite
+        run: cargo test --locked
+      - name: Test with Postgres
+        env:
+          NOTES_TEST_POSTGRES_URL: postgres://postgres:ci-only@127.0.0.1:5432
+        run: cargo test --locked
+
+  # One job per architecture on a native runner. The main node of the cluster
+  # is arm64, and compiling Rust under emulation takes most of an hour.
+  image:
+    name: Image (${{ matrix.arch }})
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: server
+          platforms: linux/${{ matrix.arch }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ env.IMAGE }}:${{ github.sha }}-${{ matrix.arch }}
+          provenance: false
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+
+  publish:
+    name: Publish multi-arch image
+    if: github.event_name != 'pull_request'
+    needs: image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.manifest.outputs.digest }}
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Join both architectures under one tag
+        id: manifest
+        run: |
+          docker buildx imagetools create \
+            -t "$IMAGE:$GITHUB_SHA" -t "$IMAGE:latest" \
+            "$IMAGE:$GITHUB_SHA-amd64" "$IMAGE:$GITHUB_SHA-arm64"
+          digest=$(docker buildx imagetools inspect "$IMAGE:$GITHUB_SHA" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Published \`$IMAGE@$digest\`" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy to magical.rocks
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: publish
+    runs-on: ubuntu-24.04
+    environment:
+      name: production
+      url: https://notes.magical.rocks
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    env:
+      DIGEST: ${{ needs.publish.outputs.digest }}
+    steps:
+      # A job-level `if` cannot see secrets, so a step decides. Without the
+      # secret the image is still published and the run stays green.
+      - name: Check for cluster access
+        id: access
+        env:
+          KUBECONFIG_DATA: ${{ secrets.KUBECONFIG }}
+        run: |
+          if [ -n "$KUBECONFIG_DATA" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No KUBECONFIG secret, so nothing was deployed. See deploy/README.md."
+          fi
+      - name: Roll out the new image
+        if: steps.access.outputs.configured == 'true'
+        env:
+          KUBECONFIG_DATA: ${{ secrets.KUBECONFIG }}
+        run: |
+          umask 077
+          printf '%s' "$KUBECONFIG_DATA" > "$RUNNER_TEMP/kubeconfig"
+          export KUBECONFIG="$RUNNER_TEMP/kubeconfig"
+          # By digest: exactly the image this run built, whatever "latest" is by now.
+          kubectl -n notes set image deployment/notes-syncd "notes-syncd=$IMAGE@$DIGEST"
+          kubectl -n notes rollout status deployment/notes-syncd --timeout=180s
+      - name: Remove the credentials
+        if: always()
+        run: rm -f "$RUNNER_TEMP/kubeconfig"
+      - name: Check the public address
+        if: steps.access.outputs.configured == 'true'
+        run: curl --fail --silent --show-error --retry 5 --retry-delay 5 --tlsv1.3 https://notes.magical.rocks/healthz

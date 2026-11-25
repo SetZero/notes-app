@@ -1,0 +1,46 @@
+@startuml 01-account-setup
+title Protocol 01 - First device: account setup
+
+skinparam shadowing false
+skinparam defaultFontName sans-serif
+autonumber
+
+actor "User" as user
+participant "First device\n(core)" as dev
+participant "Sync server" as srv
+
+user -> dev : enter server URL and invite code
+
+dev -> srv : GET /v1/meta
+srv --> dev : 200 { api_versions, limits, server_time }
+dev -> dev : check api version,\ncheck clock against server_time
+
+dev -> dev : generate account key AK (256-bit random)\nrecovery_verifier = HKDF(AK, "notes/v1/recovery")
+note right of dev
+  AK never leaves the device unencrypted.
+  The server stores only a hash of the verifier,
+  which cannot be turned back into AK.
+end note
+
+dev -> srv : POST /v1/accounts\n{ invite_code, device_name, recovery_verifier }
+srv -> srv : check invite code (constant time)\ncreate account and device\ntoken = 256-bit random, store SHA-256(token)
+
+alt invite code valid
+  srv --> dev : 201 { account_id, device_id, token }
+  dev -> dev : SecureStore: put AK, token, account_id, device_id
+  dev --> user : show recovery phrase (AK as 24 words)\nask user to write it down
+else invalid or rate limited
+  srv --> dev : 403 problem "invalid_invite"\nor 429 with Retry-After
+  dev --> user : show error
+end
+
+== Recovery (all devices lost) ==
+
+user -> dev : enter server URL, account id, recovery phrase
+dev -> dev : AK = decode(phrase)\nrecovery_verifier = HKDF(AK, "notes/v1/recovery")
+dev -> srv : POST /v1/accounts/:account_id/recover\n{ device_name, recovery_verifier }
+srv -> srv : compare hash (constant time)\ncreate device and token
+srv --> dev : 201 { account_id, device_id, token }
+dev -> dev : store AK and token,\nfull sync from cursor 0
+
+@enduml

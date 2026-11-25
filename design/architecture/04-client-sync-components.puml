@@ -1,0 +1,108 @@
+@startuml 04-client-sync-components
+title Architecture 04 - Client side of the sync (inside the core)
+
+skinparam shadowing false
+skinparam componentStyle rectangle
+skinparam defaultFontName sans-serif
+skinparam rectangle {
+  BackgroundColor<<shared>> #DCEBFA
+  BackgroundColor<<ports>> #C9EFE3
+  BackgroundColor<<platform>> #FCE6C8
+  BackgroundColor<<external>> #EEEEEE
+}
+
+rectangle "Shell (Slint or DOM)" as shell <<external>>
+
+rectangle "Core (Rust, no_std + alloc, shared by all platforms)" as core {
+
+  rectangle "App" as g_app <<shared>> {
+    component "Command handler\nand view models" as app
+    component "Note model\nblocks, merge" as model
+    component "HybridClock\nversion generator" as clock
+  }
+
+  rectangle "Sync" as g_sync <<shared>> {
+    component "Scheduler\npoll timer, backoff" as sched
+    component "SyncEngine\nstate machine" as engine
+    component "Outbox\nchanged blocks" as outbox
+    component "ApiClient\nREST + JSON" as api
+    component "PairingClient\nSPAKE2" as pairing
+  }
+
+  rectangle "Crypto" as g_crypto <<shared>> {
+    component "BlockCipher\nAES-256-GCM" as cipher
+    component "KeyRing\naccount and note keys" as keyring
+  }
+
+  rectangle "Storage" as g_store <<shared>> {
+    component "Storage engine\nblocks, outbox, cursor" as store
+  }
+
+  rectangle "HAL ports (traits)" as g_ports <<ports>> {
+    component "HttpTransport" as p_http
+    component "FileStore" as p_file
+    component "SecureStore" as p_secret
+    component "Entropy" as p_rng
+    component "TimeSource" as p_time
+    component "NetworkMonitor" as p_net
+  }
+}
+
+rectangle "HAL adapter (one per build)" as g_hal <<platform>> {
+  component "Desktop" as h_desktop
+  component "Android" as h_android
+  component "Web" as h_web
+  component "Zephyr\n(ESP32-P4 device)" as h_esp
+}
+
+cloud "Sync server" as server
+
+' layout inside the groups (invisible)
+app -[hidden]right- model
+model -[hidden]right- clock
+sched -[hidden]right- engine
+engine -[hidden]right- outbox
+outbox -[hidden]right- api
+api -[hidden]right- pairing
+cipher -[hidden]right- keyring
+p_http -[hidden]right- p_file
+p_file -[hidden]right- p_secret
+p_secret -[hidden]right- p_rng
+p_rng -[hidden]right- p_time
+p_time -[hidden]right- p_net
+h_desktop -[hidden]right- h_android
+h_android -[hidden]right- h_web
+h_web -[hidden]right- h_esp
+
+' dependencies between groups only
+shell -down-> g_app : commands /\nview models
+g_app -down-> g_sync : changed blocks
+g_app -down-> g_store
+g_sync -down-> g_crypto : seal / open
+g_sync -down-> g_store : cursor, pages
+g_sync -down-> g_ports
+g_crypto -down-> g_ports
+g_store -down-> g_ports
+g_ports -down-> g_hal : implemented by
+g_hal -down-> server : HTTPS (TLS 1.3)
+
+legend right
+  Which component uses which port
+  | Component | Ports |
+  | ApiClient | HttpTransport |
+  | SyncEngine | NetworkMonitor, TimeSource |
+  | HybridClock | TimeSource |
+  | KeyRing | SecureStore, Entropy |
+  | BlockCipher | Entropy |
+  | Storage engine | FileStore |
+
+  Arrows are drawn between groups, not components.
+  All protocol logic lives in Sync, once. Platforms differ
+  only in the adapter and in limits (page size, poll interval).
+  Nothing below Crypto ever sees plaintext or keys.
+  Storage candidate: SQLite on top of FileStore,
+  still to be proven on littlefs under Zephyr.
+  The core is no_std + alloc, because Rust on Zephyr has no std.
+end legend
+
+@enduml

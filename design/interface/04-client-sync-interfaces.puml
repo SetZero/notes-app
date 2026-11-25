@@ -1,0 +1,160 @@
+@startuml 04-client-sync-interfaces
+title Interface 04 - Client sync interfaces (core API and platform ports)
+
+skinparam shadowing false
+skinparam defaultFontName sans-serif
+skinparam classAttributeIconSize 0
+hide empty members
+
+package "Core API (called by the shell)" {
+  interface SyncControl {
+    create_account(server_url, invite_code, device_name) : RecoveryPhrase
+    recover_account(server_url, account_id, phrase, device_name)
+    start_pairing(server_url, device_name) : PairingCode
+    cancel_pairing()
+    claim_pairing(code) : PendingDevice
+    approve_pairing(pending)
+    list_devices() : DeviceInfo[]
+    revoke_device(device_id)
+    sync_now()
+    status() : SyncStatus
+  }
+
+  class SyncStatus {
+    state : SyncState (see protocol 05)
+    pending_changes : int
+    last_synced_at : Timestamp?
+    last_error : SyncError?
+  }
+
+  class SyncConfig {
+    page_limit : int
+    page_max_bytes : int
+    poll_interval : Duration
+    use_event_stream : bool
+    request_timeout : Duration
+  }
+}
+
+package "Core internals" {
+  class SyncEngine
+  class ApiClient {
+    meta() : Meta
+    create_account(req) : DeviceCredentials
+    recover(account_id, req) : DeviceCredentials
+    create_pairing(req) : PairingCreated
+    poll_pairing(id, poll_token) : PairingStatus
+    claim_pairing(req) : PairingClaimed
+    approve_pairing(id, req)
+    list_devices() : DeviceList
+    revoke_device(id)
+    pull(cursor, limit, max_bytes) : ChangePage
+    push(req) : PushResponse
+    blob_exists(hash) : bool
+    blob_put(hash, reader, size)
+    blob_get(hash, offset, writer)
+    events() : EventStream
+  }
+  class LocalStore {
+    get_block(block_id) : Block?
+    put_block(block)
+    outbox_take(max) : Block[]
+    outbox_remove(block_ids)
+    outbox_len() : int
+    cursor() : int64
+    apply_page(blocks, next_cursor)
+    reconcile_after_resync(seen_block_ids)
+  }
+  class BlockCipher {
+    seal(block) : BlockUpload
+    open(envelope) : Block
+  }
+  class KeyRing {
+    note_key(note_id) : Key
+    recovery_verifier() : bytes
+    export_phrase() : RecoveryPhrase
+  }
+}
+
+package "HAL ports (the complete per-platform surface)" {
+  interface HttpTransport {
+    send(request) : Response
+    send_streaming(request, body_reader) : Response
+    receive_streaming(request, body_writer) : ResponseHead
+    open_event_stream(request) : EventStream
+  }
+
+  interface FileStore {
+    open(name, mode) : FileHandle
+    read_at(handle, offset, buf) : int
+    write_at(handle, offset, bytes)
+    sync(handle)
+    close(handle)
+    size(name) : int?
+    rename(from, to)
+    remove(name)
+    list(prefix) : string[]
+  }
+
+  interface Entropy {
+    fill(buf)
+  }
+
+  interface SecureStore {
+    get(name) : bytes?
+    put(name, bytes)
+    delete(name)
+  }
+
+  interface TimeSource {
+    now_unix_ms() : int64
+    monotonic_ms() : int64
+  }
+
+  interface NetworkMonitor {
+    is_online() : bool
+    on_change(callback)
+  }
+}
+
+SyncEngine ..|> SyncControl
+SyncEngine --> ApiClient
+SyncEngine --> BlockCipher
+SyncEngine --> LocalStore
+SyncEngine --> TimeSource
+SyncEngine --> NetworkMonitor
+SyncEngine --> SyncConfig
+SyncEngine ..> SyncStatus
+ApiClient --> HttpTransport
+BlockCipher --> KeyRing
+KeyRing --> SecureStore
+KeyRing --> Entropy
+BlockCipher --> Entropy
+LocalStore --> FileStore
+
+note right of SyncConfig
+  Defaults
+  desktop, Android, web: 100 blocks, 1 MiB,
+  poll 60 s, event stream on.
+  ESP32: 25 blocks, 256 KiB,
+  poll 60 s and on wake, event stream off.
+end note
+
+note bottom of LocalStore
+  apply_page stores the merged blocks and the new
+  cursor in one transaction. A crash between two
+  pages can therefore never skip or repeat changes.
+end note
+
+note bottom of SecureStore
+  Holds: account key, device token, account id,
+  device id, server URL and pinned CA if any.
+end note
+
+note bottom of HttpTransport
+  The transport validates the server certificate.
+  Plain HTTP is refused. Redirects to another
+  host are not followed.
+end note
+
+@enduml

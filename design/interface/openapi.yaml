@@ -1,0 +1,1022 @@
+openapi: 3.1.0
+info:
+  title: Notes Sync API
+  version: 1.0.0-draft
+  summary: Sync protocol between the notes clients and the self-hosted sync server.
+  description: |
+    The server is an untrusted relay. It stores and forwards encrypted blocks and
+    never sees note content, titles, tags or the account key.
+
+    Conventions
+    - HTTPS only, TLS 1.3. Plain HTTP is refused.
+    - Request and response bodies are JSON (UTF-8) unless stated otherwise.
+    - Binary values inside JSON are base64 (standard alphabet, padded).
+    - Errors use `application/problem+json` (RFC 9457) with a stable `code`.
+    - Both sides ignore unknown JSON fields.
+    - Every response carries `X-Request-Id`.
+
+    Related diagrams: `design/protocol/*.puml`.
+servers:
+  - url: "{server}"
+    description: Your self-hosted sync server
+    variables:
+      server:
+        default: https://localhost:8443
+tags:
+  - name: Service
+    description: Health and capability discovery. No authentication.
+  - name: Accounts
+    description: Account creation and recovery. No authentication, rate limited.
+  - name: Auth
+    description: OpenID Connect login (for example Keycloak) as an alternative or addition to the invite code.
+  - name: Pairing
+    description: Adding a device with SPAKE2 (RFC 9382). See protocol/02-device-pairing.
+  - name: Devices
+    description: List and revoke devices of the account.
+  - name: Changes
+    description: The change feed of encrypted blocks. See protocol/03-sync-cycle.
+  - name: Blobs
+    description: Encrypted attachments, addressed by the SHA-256 of the ciphertext.
+  - name: Events
+    description: Optional change notifications as Server-Sent Events.
+
+security:
+  - deviceToken: []
+
+paths:
+  /healthz:
+    get:
+      tags: [Service]
+      operationId: getHealth
+      summary: Liveness check
+      security: []
+      responses:
+        "200":
+          description: The server is running.
+
+  /v1/meta:
+    get:
+      tags: [Service]
+      operationId: getMeta
+      summary: Supported API versions, limits and server time
+      description: Clients call this first to check the API version and their clock.
+      security: []
+      responses:
+        "200":
+          description: Server capabilities.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Meta"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/auth/oidc/nonce:
+    post:
+      tags: [Auth]
+      operationId: createOidcNonce
+      summary: Get a nonce for an OIDC login
+      description: |
+        The client puts this nonce into its authorization request to the identity
+        provider (authorization code flow with PKCE, or the device flow). The server
+        only accepts ID tokens that carry a nonce it issued, and each nonce works
+        once, so a captured ID token cannot be replayed.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OidcNonceRequest"
+      responses:
+        "200":
+          description: A fresh nonce.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OidcNonce"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/accounts:
+    post:
+      tags: [Accounts]
+      operationId: createAccount
+      summary: Create an account and its first device
+      description: |
+        The account key is generated on the device and never sent. The server only
+        receives a recovery verifier derived from it and stores a hash of that.
+
+        Who may create an account depends on the server's enrollment mode (see
+        `auth.enrollment` in `/v1/meta`): `invite` needs `invite_code`, `oidc` needs
+        `oidc`, `either` accepts one of them. An account created with `oidc` is bound
+        to that identity, and each identity can own one account.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAccountRequest"
+      responses:
+        "201":
+          description: Account and first device created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceCredentials"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          description: |
+            The invite code is wrong (`invalid_invite`), or the ID token was not
+            accepted (`forbidden`). The reason for a rejected token is only logged.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "409":
+          description: |
+            The OIDC identity already owns an account (`account_exists`). The problem
+            document carries its `account_id`, for use with recovery.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/accounts/{account_id}/recover:
+    post:
+      tags: [Accounts]
+      operationId: recoverAccount
+      summary: Register a new device using the recovery phrase
+      description: |
+        For the case that all devices are lost. The client derives the recovery
+        verifier from the recovery phrase; the server compares it in constant time.
+        If the account is bound to an OIDC identity, a fresh ID token of that same
+        identity is required as well: recovery then needs both the phrase and a login.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecoverRequest"
+      responses:
+        "201":
+          description: New device created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceCredentials"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          description: Unknown account or wrong verifier (`forbidden`). The two cases are not distinguished.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/pairings:
+    post:
+      tags: [Pairing]
+      operationId: createPairing
+      summary: Start pairing (called by the new device)
+      description: |
+        The new device sends its SPAKE2 message. The secret part of the pairing
+        code is never sent to the server. The pairing expires after `expires_in` seconds.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePairingRequest"
+      responses:
+        "201":
+          description: Pairing created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PairingCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/pairings/claim:
+    post:
+      tags: [Pairing]
+      operationId: claimPairing
+      summary: Look up a pairing by channel (called by the existing device)
+      description: |
+        Binds the pairing to the caller's account. A pairing can be claimed once;
+        a second claim gets `pairing_state_conflict`. Claims are strictly rate limited
+        per device.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClaimRequest"
+      responses:
+        "200":
+          description: Pairing found and claimed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PairingClaimed"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/PairingConflict"
+        "410":
+          $ref: "#/components/responses/PairingExpired"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/pairings/{pairing_id}:
+    get:
+      tags: [Pairing]
+      operationId: getPairing
+      summary: Poll the pairing state (called by the new device)
+      description: |
+        Authenticated with the poll token from `createPairing`. When the state is
+        `approved` the response carries the device token and the wrapped account key
+        exactly once; the pairing is deleted afterwards.
+      security:
+        - pollToken: []
+      parameters:
+        - $ref: "#/components/parameters/PairingId"
+      responses:
+        "200":
+          description: Current pairing state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PairingStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          $ref: "#/components/responses/PairingExpired"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/pairings/{pairing_id}/approve:
+    post:
+      tags: [Pairing]
+      operationId: approvePairing
+      summary: Approve a pairing (called by the existing device)
+      description: |
+        Sends the existing device's SPAKE2 message and the account key wrapped with
+        the SPAKE2 session key. Only the account that claimed the pairing can approve
+        it. The new device and its token are created when the new device polls.
+      parameters:
+        - $ref: "#/components/parameters/PairingId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApproveRequest"
+      responses:
+        "204":
+          description: Approved.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/PairingConflict"
+        "410":
+          $ref: "#/components/responses/PairingExpired"
+
+  /v1/devices:
+    get:
+      tags: [Devices]
+      operationId: listDevices
+      summary: List the devices of the account
+      responses:
+        "200":
+          description: All devices that are not revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/devices/{device_id}:
+    delete:
+      tags: [Devices]
+      operationId: revokeDevice
+      summary: Revoke a device
+      description: The device's token stops working immediately. Safe to repeat.
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+      responses:
+        "204":
+          description: Revoked, or already revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/changes:
+    get:
+      tags: [Changes]
+      operationId: pullChanges
+      summary: Pull blocks changed since a cursor
+      description: |
+        Returns blocks with `seq` greater than `since`, ordered by `seq`. The page
+        includes blocks pushed by the calling device; clients skip those by
+        `origin_device_id`.
+      parameters:
+        - name: since
+          in: query
+          required: true
+          description: Last cursor the device committed. `0` for a full sync.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: limit
+          in: query
+          description: Maximum number of blocks. Capped by `limits.max_batch_blocks`.
+          schema:
+            type: integer
+            minimum: 1
+            default: 100
+        - name: max_bytes
+          in: query
+          description: |
+            Soft cap for the response body. The server stops adding blocks when the
+            cap is reached but always returns at least one. The ESP32 uses 262144.
+          schema:
+            type: integer
+            minimum: 1
+            default: 1048576
+      responses:
+        "200":
+          description: One page of changes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChangePage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "410":
+          description: |
+            The cursor is older than the server's history (`cursor_expired`).
+            The client does a full sync from `since=0`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    post:
+      tags: [Changes]
+      operationId: pushChanges
+      summary: Push a batch of encrypted blocks
+      description: |
+        The server keeps only the newest version of each block. Per block the result
+        is `accepted`, `duplicate` (same version already stored), `stale` (a newer
+        version is stored) or `rejected`. Safe to repeat: a block is identified by
+        `block_id` and `version`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PushRequest"
+      responses:
+        "200":
+          description: One result per block, in request order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PushResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/blobs/{hash}:
+    parameters:
+      - $ref: "#/components/parameters/BlobHash"
+    head:
+      tags: [Blobs]
+      operationId: blobExists
+      summary: Check whether a blob is stored
+      responses:
+        "200":
+          description: The blob exists.
+          headers:
+            Content-Length:
+              schema:
+                type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: The blob is not stored.
+    get:
+      tags: [Blobs]
+      operationId: getBlob
+      summary: Download an encrypted blob
+      parameters:
+        - name: Range
+          in: header
+          description: Optional byte range, used to resume a download.
+          schema:
+            type: string
+            examples: ["bytes=65536-"]
+      responses:
+        "200":
+          description: The whole blob.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "206":
+          description: The requested range.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Blobs]
+      operationId: putBlob
+      summary: Upload an encrypted blob
+      description: |
+        The server hashes the body while storing it and rejects it if the SHA-256
+        does not match the path. Safe to repeat.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: The blob was already stored.
+        "201":
+          description: Stored.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "422":
+          description: The body's SHA-256 does not match the path (`hash_mismatch`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/events:
+    get:
+      tags: [Events]
+      operationId: streamEvents
+      summary: Change notifications (Server-Sent Events)
+      description: |
+        Sends `event: changed` with a `ChangedEvent` as data whenever a block of the
+        account is accepted, and a comment line every 25 seconds as keep-alive.
+        Optional: clients may poll `pullChanges` instead, as the ESP32 does.
+      responses:
+        "200":
+          description: An event stream that stays open.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: |
+                event: changed
+                data: {"cursor": 1234}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+components:
+  securitySchemes:
+    deviceToken:
+      type: http
+      scheme: bearer
+      description: Device token (32 random bytes, base64) issued at account creation, recovery or pairing.
+    pollToken:
+      type: http
+      scheme: bearer
+      description: Poll token returned by `createPairing`. Valid only for that pairing.
+
+  parameters:
+    AccountId:
+      name: account_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    DeviceId:
+      name: device_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PairingId:
+      name: pairing_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    BlobHash:
+      name: hash
+      in: path
+      required: true
+      description: SHA-256 of the encrypted blob, lower-case hex.
+      schema:
+        type: string
+        pattern: "^[0-9a-f]{64}$"
+
+  responses:
+    BadRequest:
+      description: The request is malformed or fails validation (`malformed_request`, `validation_failed`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Unauthorized:
+      description: The token is missing, unknown or revoked (`unauthorized`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    NotFound:
+      description: The resource does not exist (`not_found`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    PairingConflict:
+      description: The pairing is not in the state this call needs (`pairing_state_conflict`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    PairingExpired:
+      description: The pairing has expired or was cancelled (`pairing_expired`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    TooLarge:
+      description: |
+        The body exceeds a limit from `/v1/meta` (`payload_too_large`, `blob_too_large`),
+        or the account's attachment quota is used up (`blob_too_large`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    RateLimited:
+      description: Too many requests (`rate_limited`).
+      headers:
+        Retry-After:
+          description: Seconds to wait before the next request.
+          schema:
+            type: integer
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+
+  schemas:
+    Uuid:
+      type: string
+      format: uuid
+    Base64:
+      type: string
+      contentEncoding: base64
+    Key32:
+      description: 32 bytes, base64.
+      type: string
+      contentEncoding: base64
+      minLength: 44
+      maxLength: 44
+    Nonce:
+      description: 12 random bytes, base64.
+      type: string
+      contentEncoding: base64
+      minLength: 16
+      maxLength: 16
+    Version:
+      description: |
+        Hybrid logical clock, 24 lower-case hex characters, compared bytewise:
+        12 digits unix time in ms, 4 digits counter, 8 digits device tag.
+      type: string
+      pattern: "^[0-9a-f]{24}$"
+      examples: ["019a1f3c5e80000a7c3e91b2"]
+    DeviceName:
+      type: string
+      minLength: 1
+      maxLength: 64
+
+    Meta:
+      type: object
+      required: [api_versions, server_time, limits, auth]
+      properties:
+        auth:
+          $ref: "#/components/schemas/AuthInfo"
+        api_versions:
+          type: array
+          items:
+            type: string
+          examples: [["v1"]]
+        server_time:
+          type: string
+          format: date-time
+        limits:
+          $ref: "#/components/schemas/Limits"
+    Limits:
+      type: object
+      required:
+        - max_batch_blocks
+        - max_block_ciphertext_bytes
+        - max_request_bytes
+        - max_blob_bytes
+        - max_clock_skew_seconds
+      properties:
+        max_batch_blocks:
+          type: integer
+          default: 100
+        max_block_ciphertext_bytes:
+          type: integer
+          default: 65536
+        max_request_bytes:
+          type: integer
+          default: 1048576
+        max_blob_bytes:
+          type: integer
+          default: 26214400
+        max_clock_skew_seconds:
+          type: integer
+          default: 600
+    Problem:
+      description: RFC 9457 problem details with a stable machine-readable code.
+      type: object
+      required: [type, title, status, code, request_id]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+        code:
+          type: string
+          enum:
+            - malformed_request
+            - validation_failed
+            - unauthorized
+            - forbidden
+            - invalid_invite
+            - not_found
+            - account_exists
+            - pairing_state_conflict
+            - pairing_expired
+            - cursor_expired
+            - payload_too_large
+            - blob_too_large
+            - hash_mismatch
+            - rate_limited
+            - internal
+            - unavailable
+        detail:
+          type: string
+        request_id:
+          type: string
+        account_id:
+          description: Only with `account_exists`.
+          type: string
+          format: uuid
+
+    OidcAssertion:
+      description: Proof of an OIDC login.
+      type: object
+      required: [provider, id_token]
+      properties:
+        provider:
+          description: Provider id from `auth.oidc` in `/v1/meta`.
+          type: string
+        id_token:
+          description: |
+            ID token issued for this server's client id, carrying a nonce from
+            `createOidcNonce`, and not older than 10 minutes.
+          type: string
+    OidcNonceRequest:
+      type: object
+      required: [provider]
+      properties:
+        provider:
+          type: string
+    OidcNonce:
+      type: object
+      required: [nonce, expires_in]
+      properties:
+        nonce:
+          type: string
+        expires_in:
+          description: Seconds until the nonce expires.
+          type: integer
+          examples: [600]
+    AuthInfo:
+      type: object
+      required: [enrollment, oidc]
+      properties:
+        enrollment:
+          type: string
+          enum: [invite, oidc, either]
+        oidc:
+          type: array
+          items:
+            type: object
+            required: [id, issuer, client_id, scopes]
+            properties:
+              id:
+                type: string
+              issuer:
+                type: string
+                format: uri
+              client_id:
+                type: string
+              scopes:
+                type: array
+                items:
+                  type: string
+
+    CreateAccountRequest:
+      type: object
+      required: [device_name, recovery_verifier]
+      properties:
+        invite_code:
+          type: string
+        oidc:
+          $ref: "#/components/schemas/OidcAssertion"
+        device_name:
+          $ref: "#/components/schemas/DeviceName"
+        recovery_verifier:
+          $ref: "#/components/schemas/Key32"
+    RecoverRequest:
+      type: object
+      required: [device_name, recovery_verifier]
+      properties:
+        oidc:
+          $ref: "#/components/schemas/OidcAssertion"
+        device_name:
+          $ref: "#/components/schemas/DeviceName"
+        recovery_verifier:
+          $ref: "#/components/schemas/Key32"
+    DeviceCredentials:
+      type: object
+      required: [account_id, device_id, token]
+      properties:
+        account_id:
+          $ref: "#/components/schemas/Uuid"
+        device_id:
+          $ref: "#/components/schemas/Uuid"
+        token:
+          $ref: "#/components/schemas/Key32"
+    DeviceList:
+      type: object
+      required: [devices]
+      properties:
+        devices:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeviceInfo"
+    DeviceInfo:
+      type: object
+      required: [device_id, name, created_at, last_seen_at, current]
+      properties:
+        device_id:
+          $ref: "#/components/schemas/Uuid"
+        name:
+          $ref: "#/components/schemas/DeviceName"
+        created_at:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time
+        current:
+          description: True for the device that made the request.
+          type: boolean
+
+    CreatePairingRequest:
+      type: object
+      required: [device_name, pake_msg]
+      properties:
+        device_name:
+          $ref: "#/components/schemas/DeviceName"
+        pake_msg:
+          description: SPAKE2 message of side A (the new device).
+          $ref: "#/components/schemas/Base64"
+    PairingCreated:
+      type: object
+      required: [pairing_id, channel, poll_token, expires_in]
+      properties:
+        pairing_id:
+          $ref: "#/components/schemas/Uuid"
+        channel:
+          description: Public part of the pairing code, shown to the user together with the secret part.
+          type: string
+          pattern: "^[0-9]{6}$"
+        poll_token:
+          $ref: "#/components/schemas/Key32"
+        expires_in:
+          description: Seconds until the pairing expires.
+          type: integer
+          examples: [300]
+    ClaimRequest:
+      type: object
+      required: [channel]
+      properties:
+        channel:
+          type: string
+          pattern: "^[0-9]{6}$"
+    PairingClaimed:
+      type: object
+      required: [pairing_id, device_name, pake_msg]
+      properties:
+        pairing_id:
+          $ref: "#/components/schemas/Uuid"
+        device_name:
+          $ref: "#/components/schemas/DeviceName"
+        pake_msg:
+          description: SPAKE2 message of side A (the new device).
+          $ref: "#/components/schemas/Base64"
+    ApproveRequest:
+      type: object
+      required: [pake_msg, wrapped_account_key]
+      properties:
+        pake_msg:
+          description: SPAKE2 message of side B (the existing device).
+          $ref: "#/components/schemas/Base64"
+        wrapped_account_key:
+          $ref: "#/components/schemas/WrappedKey"
+    WrappedKey:
+      description: AES-256-GCM of `{ account_id, account key }` under the SPAKE2 session key.
+      type: object
+      required: [nonce, ciphertext]
+      properties:
+        nonce:
+          $ref: "#/components/schemas/Nonce"
+        ciphertext:
+          $ref: "#/components/schemas/Base64"
+    PairingStatus:
+      description: All fields except `state` are present only when `state` is `approved`.
+      type: object
+      required: [state]
+      properties:
+        state:
+          type: string
+          enum: [pending, claimed, approved]
+        account_id:
+          $ref: "#/components/schemas/Uuid"
+        device_id:
+          $ref: "#/components/schemas/Uuid"
+        token:
+          $ref: "#/components/schemas/Key32"
+        pake_msg:
+          description: SPAKE2 message of side B (the existing device).
+          $ref: "#/components/schemas/Base64"
+        wrapped_account_key:
+          $ref: "#/components/schemas/WrappedKey"
+
+    BlockUpload:
+      type: object
+      required: [block_id, note_id, version, deleted, nonce, ciphertext]
+      properties:
+        block_id:
+          $ref: "#/components/schemas/Uuid"
+        note_id:
+          $ref: "#/components/schemas/Uuid"
+        version:
+          $ref: "#/components/schemas/Version"
+        deleted:
+          description: True for a tombstone. Bound into the authentication tag.
+          type: boolean
+        nonce:
+          $ref: "#/components/schemas/Nonce"
+        ciphertext:
+          description: |
+            AES-256-GCM ciphertext and tag of the block payload under the note key.
+            Associated data: `"notes/v1" | block_id | note_id | version | deleted`.
+            For a tombstone the payload is empty, so this is the tag only.
+          $ref: "#/components/schemas/Base64"
+    BlockEnvelope:
+      description: A stored block as returned by the change feed.
+      allOf:
+        - $ref: "#/components/schemas/BlockUpload"
+        - type: object
+          required: [seq, origin_device_id]
+          properties:
+            seq:
+              description: Server-assigned, strictly increasing per account. Not authenticated; use for paging only.
+              type: integer
+              format: int64
+            origin_device_id:
+              description: Device that pushed this version. Not authenticated; use for echo suppression only.
+              $ref: "#/components/schemas/Uuid"
+    ChangePage:
+      type: object
+      required: [changes, next_cursor, has_more]
+      properties:
+        changes:
+          type: array
+          items:
+            $ref: "#/components/schemas/BlockEnvelope"
+        next_cursor:
+          description: Pass as `since` in the next call.
+          type: integer
+          format: int64
+        has_more:
+          type: boolean
+    PushRequest:
+      type: object
+      required: [changes]
+      properties:
+        changes:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/BlockUpload"
+    PushResponse:
+      type: object
+      required: [results, cursor]
+      properties:
+        results:
+          description: Same length and order as the request.
+          type: array
+          items:
+            $ref: "#/components/schemas/PushResult"
+        cursor:
+          description: Highest `seq` of the account after this push.
+          type: integer
+          format: int64
+    PushResult:
+      type: object
+      required: [block_id, status]
+      properties:
+        block_id:
+          $ref: "#/components/schemas/Uuid"
+        status:
+          type: string
+          enum: [accepted, duplicate, stale, rejected]
+        seq:
+          description: Present for `accepted` and `duplicate`.
+          type: integer
+          format: int64
+        reason:
+          description: Present for `rejected`.
+          type: string
+          enum: [clock_skew, ciphertext_too_large, invalid_version]
+    ChangedEvent:
+      type: object
+      required: [cursor]
+      properties:
+        cursor:
+          type: integer
+          format: int64

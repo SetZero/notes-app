@@ -1,0 +1,163 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 560" width="1000" height="560" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif">
+  <title>Architecture 05 - Layer model: one codebase, thin HAL</title>
+  <style>
+    .t  { font-size: 13px; font-weight: 600; text-anchor: middle; dominant-baseline: central; }
+    .s  { font-size: 11px; text-anchor: middle; dominant-baseline: central; }
+    .l  { font-size: 12px; font-weight: 600; fill: #1F2937; dominant-baseline: central; }
+    .ls { font-size: 10.5px; fill: #6B7280; dominant-baseline: central; }
+    .n  { font-size: 11.5px; fill: #374151; dominant-baseline: central; }
+    .shell    { fill: #27364B; }
+    .web      { fill: #5B6B82; }
+    .api      { fill: #D9762B; }
+    .core     { fill: #DDE7F6; stroke: #A9BEDF; }
+    .port     { fill: #D5EEE4; stroke: #8CCBB1; }
+    .adapter  { fill: #F9E4D2; stroke: #E3B48D; }
+    .ext      { fill: #ECEEF1; stroke: #C5CAD3; }
+    .platform { fill: #14191F; }
+    .on-dark  { fill: #FFFFFF; }
+    .on-core  { fill: #1B2D4F; }
+    .on-port  { fill: #114433; }
+    .on-adapt { fill: #5C3212; }
+    .on-ext   { fill: #374151; }
+  </style>
+
+  <rect width="1000" height="560" fill="#FFFFFF"/>
+  <text x="16" y="24" font-size="15" font-weight="600" fill="#111827" dominant-baseline="central">Layer model: one codebase, thin HAL</text>
+
+  <!-- layer markers and labels (left column) -->
+  <g>
+    <rect x="114" y="44"  width="3" height="52"  class="shell"/>
+    <text x="16" y="70" class="l">Shell</text>
+
+    <rect x="114" y="102" width="3" height="34"  class="api"/>
+    <text x="16" y="119" class="l">Core API</text>
+
+    <rect x="114" y="142" width="3" height="144" fill="#A9BEDF"/>
+    <text x="16" y="207" class="l">Core</text>
+    <text x="16" y="222" class="ls">shared Rust, no_std</text>
+
+    <rect x="114" y="292" width="3" height="44"  fill="#8CCBB1"/>
+    <text x="16" y="307" class="l">HAL ports</text>
+    <text x="16" y="322" class="ls">traits in the core</text>
+
+    <rect x="114" y="342" width="3" height="64"  fill="#E3B48D"/>
+    <text x="16" y="367" class="l">HAL adapters</text>
+    <text x="16" y="382" class="ls">one per build</text>
+
+    <rect x="114" y="412" width="3" height="36"  class="platform"/>
+    <text x="16" y="430" class="l">Platform</text>
+  </g>
+
+  <!-- Layer 5: shell -->
+  <rect x="126" y="44" width="150" height="52" rx="4" class="web"/>
+  <text x="201" y="62" class="t on-dark">DOM UI</text>
+  <text x="201" y="79" class="s on-dark">web only</text>
+
+  <rect x="282" y="44" width="702" height="52" rx="4" class="shell"/>
+  <text x="633" y="62" class="t on-dark">Slint UI</text>
+  <text x="633" y="79" class="s on-dark">one set of .slint files for desktop, Android and the Zephyr device</text>
+
+  <!-- Layer 4: core API -->
+  <rect x="126" y="102" width="680" height="34" rx="4" class="api"/>
+  <text x="466" y="119" class="t on-dark">Core API: commands in, view models out</text>
+
+  <!-- Layer 3: core -->
+  <rect x="126" y="142" width="680" height="40" rx="4" class="core"/>
+  <text x="466" y="162" class="t on-core">App logic: view models, navigation</text>
+
+  <g>
+    <rect x="126" y="188" width="165" height="52" rx="4" class="core"/>
+    <text x="208.5" y="206" class="t on-core">Note model</text>
+    <text x="208.5" y="223" class="s on-core">blocks, merge</text>
+
+    <rect x="297" y="188" width="165" height="52" rx="4" class="core"/>
+    <text x="379.5" y="206" class="t on-core">Search</text>
+    <text x="379.5" y="223" class="s on-core">titles, full text</text>
+
+    <rect x="468" y="188" width="166" height="52" rx="4" class="core"/>
+    <text x="551" y="206" class="t on-core">Sync engine</text>
+    <text x="551" y="223" class="s on-core">state machine, REST client</text>
+
+    <rect x="640" y="188" width="166" height="52" rx="4" class="core"/>
+    <text x="723" y="206" class="t on-core">Crypto</text>
+    <text x="723" y="223" class="s on-core">keys, block cipher, pairing</text>
+  </g>
+
+  <rect x="126" y="246" width="680" height="40" rx="4" class="core"/>
+  <text x="466" y="266" class="t on-core">Storage engine: blocks, outbox, cursor</text>
+
+  <!-- Layer 2: HAL ports -->
+  <g>
+    <rect x="126" y="292" width="108" height="44" rx="4" class="port"/>
+    <text x="180" y="314" class="t on-port">FileStore</text>
+    <rect x="240" y="292" width="108" height="44" rx="4" class="port"/>
+    <text x="294" y="314" class="t on-port">HttpTransport</text>
+    <rect x="354" y="292" width="108" height="44" rx="4" class="port"/>
+    <text x="408" y="314" class="t on-port">SecureStore</text>
+    <rect x="468" y="292" width="108" height="44" rx="4" class="port"/>
+    <text x="522" y="314" class="t on-port">Entropy</text>
+    <rect x="582" y="292" width="109" height="44" rx="4" class="port"/>
+    <text x="636.5" y="314" class="t on-port">TimeSource</text>
+    <rect x="697" y="292" width="109" height="44" rx="4" class="port"/>
+    <text x="751.5" y="314" class="t on-port">NetworkMonitor</text>
+  </g>
+
+  <!-- Layer 1: HAL adapters -->
+  <g>
+    <rect x="126" y="342" width="165" height="64" rx="4" class="adapter"/>
+    <text x="208.5" y="358" class="t on-adapt">Desktop adapter</text>
+    <text x="208.5" y="376" class="s on-adapt">reqwest + rustls, files</text>
+    <text x="208.5" y="391" class="s on-adapt">DPAPI, Secret Service</text>
+
+    <rect x="297" y="342" width="165" height="64" rx="4" class="adapter"/>
+    <text x="379.5" y="358" class="t on-adapt">Android adapter</text>
+    <text x="379.5" y="376" class="s on-adapt">reqwest + rustls, files</text>
+    <text x="379.5" y="391" class="s on-adapt">Android Keystore</text>
+
+    <rect x="468" y="342" width="166" height="64" rx="4" class="adapter"/>
+    <text x="551" y="358" class="t on-adapt">Web adapter</text>
+    <text x="551" y="376" class="s on-adapt">fetch, OPFS</text>
+    <text x="551" y="391" class="s on-adapt">IndexedDB</text>
+
+    <rect x="640" y="342" width="166" height="64" rx="4" class="adapter"/>
+    <text x="723" y="358" class="t on-adapt">Zephyr adapter</text>
+    <text x="723" y="376" class="s on-adapt">sockets + mbedTLS, littlefs</text>
+    <text x="723" y="391" class="s on-adapt">PSA secure storage</text>
+  </g>
+
+  <!-- Slint runtime: beside the core, from the shell down to the platform -->
+  <rect x="812" y="102" width="172" height="304" rx="4" class="ext"/>
+  <text x="898" y="206" class="t on-ext">Slint runtime</text>
+  <text x="898" y="223" class="s on-ext">rendering and input</text>
+  <text x="898" y="258" class="s on-ext">winit on desktop</text>
+  <text x="898" y="274" class="s on-ext">android-activity on Android</text>
+  <text x="898" y="290" class="s on-ext">display + touch on Zephyr</text>
+  <text x="898" y="325" class="s on-ext" font-style="italic">not our code</text>
+
+  <!-- Layer 0: platform, labels aligned with the adapter above -->
+  <rect x="126" y="412" width="858" height="36" rx="4" class="platform"/>
+  <text x="208.5" y="430" class="t on-dark">Windows / Linux</text>
+  <text x="379.5" y="430" class="t on-dark">Android</text>
+  <text x="551"   y="430" class="t on-dark">Browser</text>
+  <text x="723"   y="430" class="t on-dark">Zephyr on ESP32-P4</text>
+
+  <!-- legend -->
+  <g>
+    <rect x="126" y="463" width="12" height="12" rx="2" class="core"/>
+    <text x="144" y="469" class="n">shared, same source in every build</text>
+    <rect x="356" y="463" width="12" height="12" rx="2" class="port"/>
+    <text x="374" y="469" class="n">HAL ports</text>
+    <rect x="452" y="463" width="12" height="12" rx="2" class="adapter"/>
+    <text x="470" y="469" class="n">the only code written per platform</text>
+    <rect x="682" y="463" width="12" height="12" rx="2" class="ext"/>
+    <text x="700" y="469" class="n">not our code</text>
+  </g>
+
+  <!-- rules -->
+  <g>
+    <text x="126" y="494" class="n">1. A layer only calls the layer directly below it.</text>
+    <text x="126" y="510" class="n">2. Nothing above the HAL adapters names a platform.</text>
+    <text x="126" y="526" class="n">3. Each build contains exactly one HAL adapter, and it implements all six ports.</text>
+    <text x="126" y="542" class="n">4. An adapter function forwards one call. If it needs a decision, that code moves to the core.</text>
+  </g>
+</svg>
