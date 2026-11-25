@@ -1,19 +1,11 @@
 // The whole app: loading, signing in, and the workspace once signed in.
 
 import { CoreFailure, Notes, type RecoveryKit } from "../core";
-import {
-  OidcSignIn,
-  SignInFailure,
-  type Draft,
-  type Enrollment,
-  type Login,
-  type Provider,
-} from "../hal/OidcSignIn";
+import { OidcSignIn, SignInFailure, type Draft, type Enrollment, type Login, type Provider } from "../hal/OidcSignIn";
 import { ViewModel } from "./ViewModel";
 import { WorkspaceViewModel } from "./WorkspaceViewModel";
 
-export type Screen =
-  "loading" | "failed" | "welcome" | "recovery-kit" | "workspace";
+export type Screen = "loading" | "failed" | "welcome" | "recovery-kit" | "workspace";
 
 export interface AppState {
   screen: Screen;
@@ -31,6 +23,11 @@ export interface AppState {
   signedInAs: string | null;
   /** What the welcome screen showed before the browser left to sign in. */
   draft: Draft | null;
+  /**
+   * Set when this browser was opened with another device's QR code. Once
+   * the pairing runs, `channel` is the number to type on that device.
+   */
+  join: { channel: string | null } | null;
 }
 
 export class AppViewModel extends ViewModel<AppState> {
@@ -38,6 +35,10 @@ export class AppViewModel extends ViewModel<AppState> {
   private readonly signIn = new OidcSignIn(AppViewModel.serverUrl);
   /** The sign-in to send with the next request. Its token is single use. */
   private login: Login | null = null;
+  /** The secret from another device's QR code, until the pairing ends. */
+  private joinSecret: string | null = null;
+  private joinTimer: number | null = null;
+  private static readonly JOIN_POLL_MS = 2000;
 
   public constructor() {
     super({
@@ -50,6 +51,7 @@ export class AppViewModel extends ViewModel<AppState> {
       providers: [],
       signedInAs: null,
       draft: null,
+      join: null,
     });
   }
 
@@ -85,6 +87,13 @@ export class AppViewModel extends ViewModel<AppState> {
   }
 
   public async start(): Promise<void> {
+    // Opened from another device's QR code? The secret is in the fragment,
+    // which no server sees; take it out of the address bar and the history.
+    const secret = new URLSearchParams(window.location.hash.slice(1)).get("join");
+    if (secret) {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      this.joinSecret = secret;
+    }
     try {
       this.notes = await Notes.open();
       if (this.notes.status().signed_in) this.enterWorkspace();
@@ -111,7 +120,55 @@ export class AppViewModel extends ViewModel<AppState> {
       signedInAs: this.login?.name ?? null,
       draft: returned?.draft ?? null,
       problem: returned && "failure" in returned ? returned.failure : null,
+      join: this.joinSecret ? { channel: null } : null,
     });
+  }
+
+  /** New device: asks the server for a pairing and waits for the other device. */
+  public async beginJoin(deviceName: string): Promise<void> {
+    const secret = this.joinSecret;
+    if (!secret) return;
+    await this.attempt(async (notes) => {
+      const ticket = await notes.pairingBegin(AppViewModel.serverUrl, secret, deviceName);
+      this.setState({ join: { channel: ticket.channel } });
+      this.joinTimer = window.setInterval(() => void this.pollJoin(notes), AppViewModel.JOIN_POLL_MS);
+    });
+  }
+
+  private async pollJoin(notes: Notes): Promise<void> {
+    try {
+      if (!(await notes.pairingPoll())) return;
+      this.endJoin();
+      this.enterWorkspace();
+    } catch (error) {
+      const failure = CoreFailure.from(error);
+      // A dropped connection is not the end: the next round tries again.
+      if (failure.code === "offline" || failure.code === "network") return;
+      // The secret stays: the same QR code is good for another try.
+      this.stopJoinTimer();
+      this.setState({
+        join: { channel: null },
+        problem: AppViewModel.explain(failure),
+      });
+    }
+  }
+
+  /** Back to the ordinary welcome screen. */
+  public cancelJoin(): void {
+    this.notes?.pairingCancel();
+    this.endJoin();
+    this.setState({ problem: null });
+  }
+
+  private stopJoinTimer(): void {
+    if (this.joinTimer !== null) window.clearInterval(this.joinTimer);
+    this.joinTimer = null;
+  }
+
+  private endJoin(): void {
+    this.stopJoinTimer();
+    this.joinSecret = null;
+    this.setState({ join: null });
   }
 
   /** Leaves for the provider's login page; `draft` is shown again on return. */
@@ -121,49 +178,25 @@ export class AppViewModel extends ViewModel<AppState> {
     try {
       await this.signIn.begin(provider, draft);
     } catch (error) {
-      const problem =
-        error instanceof SignInFailure
-          ? error.message
-          : "The sign-in service cannot be reached. Check your connection.";
+      const problem = error instanceof SignInFailure ? error.message : "The sign-in service cannot be reached. Check your connection.";
       this.setState({ busy: false, problem });
     }
   }
 
   /** With a sign-in the invite code is not needed and not sent. */
-  public async createAccount(
-    inviteCode: string,
-    deviceName: string,
-  ): Promise<void> {
+  public async createAccount(inviteCode: string, deviceName: string): Promise<void> {
     await this.attempt(async (notes) => {
       const login = this.takeLogin();
       const kit = login
-        ? await notes.createAccountWithLogin(
-            AppViewModel.serverUrl,
-            login,
-            deviceName,
-          )
-        : await notes.createAccount(
-            AppViewModel.serverUrl,
-            inviteCode,
-            deviceName,
-          );
+        ? await notes.createAccountWithLogin(AppViewModel.serverUrl, login, deviceName)
+        : await notes.createAccount(AppViewModel.serverUrl, inviteCode, deviceName);
       this.setState({ screen: "recovery-kit", kit });
     });
   }
 
-  public async recover(
-    accountId: string,
-    phrase: string,
-    deviceName: string,
-  ): Promise<void> {
+  public async recover(accountId: string, phrase: string, deviceName: string): Promise<void> {
     await this.attempt(async (notes) => {
-      await notes.recover(
-        AppViewModel.serverUrl,
-        accountId,
-        phrase,
-        deviceName,
-        this.takeLogin(),
-      );
+      await notes.recover(AppViewModel.serverUrl, accountId, phrase, deviceName, this.takeLogin());
       this.enterWorkspace();
     });
   }
@@ -182,9 +215,7 @@ export class AppViewModel extends ViewModel<AppState> {
     this.enterWorkspace();
   }
 
-  private async attempt(
-    action: (notes: Notes) => Promise<void>,
-  ): Promise<void> {
+  private async attempt(action: (notes: Notes) => Promise<void>): Promise<void> {
     if (!this.notes || this.state.busy) return;
     this.setState({ busy: true, problem: null });
     try {
@@ -198,9 +229,7 @@ export class AppViewModel extends ViewModel<AppState> {
 
   private enterWorkspace(): void {
     if (!this.notes) return;
-    const workspace = new WorkspaceViewModel(this.notes, () =>
-      this.leaveWorkspace(),
-    );
+    const workspace = new WorkspaceViewModel(this.notes, () => this.leaveWorkspace());
     this.setState({ screen: "workspace", workspace, problem: null });
     workspace.start();
     // Ask the browser not to evict the local copy under storage pressure.
@@ -220,17 +249,21 @@ export class AppViewModel extends ViewModel<AppState> {
         return "The recovery phrase is not valid. Check for a mistyped or missing word; it has 24.";
       case "bad_account_id":
         return "That does not look like an account ID. It has the form xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.";
+      case "bad_pairing_link":
+        return "This link is not complete. Scan the QR code on your other device again.";
+      case "pairing_expired":
+        return "That took too long. Start again: the code is good for five minutes.";
+      case "pairing_failed":
+        return "The two devices did not agree. Open a fresh QR code on your other device and scan it again.";
+      case "unauthorized":
+        return "The server no longer accepts this. Start again: sign in again, or scan the QR code on your other device again.";
       case "account_exists":
         return "You already have an account. Open it with your recovery kit instead.";
-      case "unauthorized":
-        return "The sign-in was not accepted or is too old. Sign in again.";
       case "forbidden":
       case "not_found":
         return "The server did not accept this. Check the account ID and the recovery phrase. If a sign-in is involved, sign in again: it can be used once and for a few minutes only.";
       case "rate_limited":
-        return failure.retryAfter
-          ? `Too many attempts. Try again in ${failure.retryAfter} seconds.`
-          : "Too many attempts. Try again in a minute.";
+        return failure.retryAfter ? `Too many attempts. Try again in ${failure.retryAfter} seconds.` : "Too many attempts. Try again in a minute.";
       case "offline":
       case "network":
         return "The server cannot be reached. Check your connection.";

@@ -6,11 +6,15 @@ import type { WorkspaceViewModel } from "../viewmodels/WorkspaceViewModel";
 import empty from "../art/empty.webp";
 import { Editor } from "./Editor";
 import { Modal } from "./Modal";
+import { QrCode } from "./QrCode";
 import { RecoveryKitCard } from "./RecoveryKitCard";
 
 const DAY = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
 const TIME = new Intl.DateTimeFormat(undefined, { timeStyle: "short" });
-const FULL = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+const FULL = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
 
 function when(ms: number): string {
   const date = new Date(ms);
@@ -96,7 +100,11 @@ export function Workspace({ workspace }: { workspace: WorkspaceViewModel }) {
   const notes = workspace.visibleNotes;
   const folders = workspace.folders;
 
-  const choose = (dialog: "devices" | "recovery" | "sign-out") => {
+  const [code, setCode] = useState("");
+  const pairing = state.addDevice;
+
+  const choose = (dialog: "devices" | "add-device" | "recovery" | "sign-out") => {
+    setCode("");
     setMenuOpen(false);
     workspace.open(dialog);
   };
@@ -106,7 +114,10 @@ export function Workspace({ workspace }: { workspace: WorkspaceViewModel }) {
       <aside className="sidebar">
         <header>
           <h1 className="brand">
-            Notes <span className="seal" aria-hidden="true">記</span>
+            Notes{" "}
+            <span className="seal" aria-hidden="true">
+              記
+            </span>
           </h1>
           <span className={`pill ${sync.phase}`} title={sync.problem ?? undefined}>
             {syncLabel(sync)}
@@ -120,6 +131,11 @@ export function Workspace({ workspace }: { workspace: WorkspaceViewModel }) {
                 <li>
                   <button role="menuitem" onClick={() => choose("devices")}>
                     Devices
+                  </button>
+                </li>
+                <li>
+                  <button role="menuitem" onClick={() => choose("add-device")}>
+                    Add a device
                   </button>
                 </li>
                 <li>
@@ -228,12 +244,80 @@ export function Workspace({ workspace }: { workspace: WorkspaceViewModel }) {
         </Modal>
       )}
 
+      {state.dialog === "add-device" && (
+        <Modal title="Add a device" onClose={() => workspace.close()}>
+          {state.problem && <p className="problem">{state.problem}</p>}
+          {pairing?.step === "show" && (
+            <form
+              className="pairing"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void workspace.findNewDevice(code);
+              }}
+            >
+              <QrCode text={pairing.link} label="QR code that opens Notes on the new device" />
+              <ol>
+                <li>Scan this with the camera of the new device. It opens Notes there.</li>
+                <li>The new device shows a six-digit code. Type it here.</li>
+              </ol>
+              <details className="link">
+                <summary>No camera on the new device?</summary>
+                <p className="muted hint">Open this link there instead. It works once, together with the code.</p>
+                <input className="mono" readOnly value={pairing.link} aria-label="Link for the new device" onFocus={(e) => e.target.select()} />
+              </details>
+              <label>
+                Code on the new device
+                <input
+                  className="mono code"
+                  value={code}
+                  onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  pattern="[0-9]{6}"
+                  placeholder="000000"
+                  required
+                  autoFocus
+                />
+              </label>
+              <p className="muted hint">Show the QR code only to your own device: whoever scans it and has you type their code gets your notes.</p>
+              <div className="actions">
+                <button className="primary" type="submit" disabled={pairing.busy || code.length !== 6}>
+                  {pairing.busy ? "Looking…" : "Continue"}
+                </button>
+              </div>
+            </form>
+          )}
+          {pairing?.step === "confirm" && (
+            <>
+              <p>
+                Add <strong>{pairing.deviceName}</strong> to your account? It will be able to read and change all your notes.
+              </p>
+              <div className="actions">
+                <button onClick={() => workspace.close()}>Cancel</button>
+                <button className="primary" disabled={pairing.busy} onClick={() => void workspace.approveNewDevice()}>
+                  {pairing.busy ? "Adding…" : "Add device"}
+                </button>
+              </div>
+            </>
+          )}
+          {pairing?.step === "done" && (
+            <>
+              <p>
+                <strong>{pairing.deviceName}</strong> is opening your notes now. You can remove it again under Devices.
+              </p>
+              <div className="actions">
+                <button className="primary" onClick={() => workspace.close()}>
+                  Done
+                </button>
+              </div>
+            </>
+          )}
+        </Modal>
+      )}
+
       {state.dialog === "recovery" && (
         <Modal title="Recovery kit" onClose={() => workspace.close()}>
-          <p>
-            With the account ID and these 24 words you can open your notes on a new device. Anyone else who has them can read your notes
-            too.
-          </p>
+          <p>With the account ID and these 24 words you can open your notes on a new device. Anyone else who has them can read your notes too.</p>
           {state.kit ? (
             <RecoveryKitCard kit={state.kit} />
           ) : (

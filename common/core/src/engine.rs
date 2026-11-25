@@ -15,9 +15,11 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use base64::engine::general_purpose::STANDARD as B64;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64_URL;
 use base64::Engine;
 use core::cell::{Cell, RefCell};
 use serde::{Deserialize, Serialize};
+use spake2::{Ed25519Group, Identity, Password, Spake2};
 use zeroize::Zeroize;
 
 use crate::crypto::{self, AccountKey};
@@ -252,8 +254,87 @@ struct Meta {
     cursor: i64,
 }
 
+/// The secret of a pairing: 128 random bits. It travels in a QR code from
+/// the device that has the account to the one that wants it, never to the
+/// server, and is the SPAKE2 password.
+const PAIRING_SECRET_LEN: usize = 16;
+const PAIRING_NEW_DEVICE: &[u8] = b"notes/pairing/new-device";
+const PAIRING_EXISTING_DEVICE: &[u8] = b"notes/pairing/existing-device";
+
+/// A pairing this device started to get into an account.
+struct Joining {
+    server_url: String,
+    pairing_id: String,
+    poll_token: String,
+    exchange: Spake2<Ed25519Group>,
+}
+
+/// A pairing of another device that this device looked up and may approve.
+struct Claimed {
+    pairing_id: String,
+    pake_msg: Vec<u8>,
+}
+
+/// What the new device shows: the number to type on the other device.
+#[derive(Serialize)]
+pub struct PairingTicket {
+    pub channel: String,
+    pub expires_in: u64,
+}
+
+/// What the existing device asks its user about.
+#[derive(Serialize)]
+pub struct PairingRequest {
+    pub device_name: String,
+}
+
+/// Hands out bytes drawn from the platform beforehand, so that a failing
+/// entropy source is an error and never a predictable key.
+struct DrawnBytes {
+    bytes: [u8; 64],
+    used: usize,
+    exhausted: bool,
+}
+
+impl rand_core::RngCore for DrawnBytes {
+    fn next_u32(&mut self) -> u32 {
+        let mut raw = [0u8; 4];
+        self.fill_bytes(&mut raw);
+        u32::from_le_bytes(raw)
+    }
+    fn next_u64(&mut self) -> u64 {
+        let mut raw = [0u8; 8];
+        self.fill_bytes(&mut raw);
+        u64::from_le_bytes(raw)
+    }
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        let end = self.used + dest.len();
+        if end > self.bytes.len() {
+            // More than was drawn: the caller checks the flag and gives up.
+            self.exhausted = true;
+            return;
+        }
+        dest.copy_from_slice(&self.bytes[self.used..end]);
+        self.used = end;
+    }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> core::result::Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+
+impl rand_core::CryptoRng for DrawnBytes {}
+
+impl Drop for DrawnBytes {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+    }
+}
+
 struct State {
     session: Option<Session>,
+    joining: Option<Joining>,
+    claimed: Option<Claimed>,
     blocks: BTreeMap<String, Block>,
     cursor: i64,
     clock: Hlc,
@@ -439,6 +520,8 @@ impl<P: Platform> Core<P> {
     pub async fn open(platform: P) -> Result<Self> {
         let mut state = State {
             session: None,
+            joining: None,
+            claimed: None,
             blocks: BTreeMap::new(),
             cursor: 0,
             clock: Hlc { ms: 0, counter: 0 },
@@ -903,6 +986,352 @@ impl<P: Platform> Core<P> {
         let (server_url, token) = self.session_endpoint()?;
         let path = format!("/v1/devices/{device_id}");
         self.call::<()>(&server_url, "DELETE", &path, Some(&token), None)
+            .await
+            .map(|_| ())
+    }
+
+    // -------------------------------------------------------------- pairing
+    //
+    // Adding a device without the recovery phrase. The device that has the
+    // account shows a secret as a QR code; the new device reads it, asks the
+    // server for a pairing and shows the pairing's number; the user types
+    // that number on the first device and confirms. Both run SPAKE2 with the
+    // secret as password through the server, which relays two messages and
+    // the account key wrapped with the result. The server sees neither the
+    // secret nor the key and cannot put itself in the middle without the
+    // secret.
+
+    /// A fresh secret for one pairing, for the device that has the account
+    /// to show (as part of a link in a QR code).
+    pub fn new_pairing_secret(&self) -> Result<String> {
+        let mut raw = [0u8; PAIRING_SECRET_LEN];
+        self.platform
+            .fill_random(&mut raw)
+            .map_err(|e| CoreError::new("entropy", e.0))?;
+        let secret = B64_URL.encode(raw);
+        raw.zeroize();
+        Ok(secret)
+    }
+
+    /// This device's side of the key exchange and the message for the other side.
+    fn start_exchange(
+        &self,
+        new_device: bool,
+        secret: &str,
+    ) -> Result<(Spake2<Ed25519Group>, Vec<u8>)> {
+        let mut password = B64_URL
+            .decode(secret.trim())
+            .ok()
+            .filter(|raw| raw.len() == PAIRING_SECRET_LEN)
+            .ok_or_else(|| CoreError::new("bad_pairing_link", "this is not a pairing link"))?;
+        let mut drawn = DrawnBytes {
+            bytes: [0u8; 64],
+            used: 0,
+            exhausted: false,
+        };
+        self.platform
+            .fill_random(&mut drawn.bytes)
+            .map_err(|e| CoreError::new("entropy", e.0))?;
+        let new = Identity::new(PAIRING_NEW_DEVICE);
+        let existing = Identity::new(PAIRING_EXISTING_DEVICE);
+        let started = if new_device {
+            Spake2::<Ed25519Group>::start_a_with_rng(
+                &Password::new(&password),
+                &new,
+                &existing,
+                &mut drawn,
+            )
+        } else {
+            Spake2::<Ed25519Group>::start_b_with_rng(
+                &Password::new(&password),
+                &new,
+                &existing,
+                &mut drawn,
+            )
+        };
+        password.zeroize();
+        if drawn.exhausted {
+            return Err(CoreError::new("entropy", "not enough random bytes"));
+        }
+        Ok(started)
+    }
+
+    /// New device: starts a pairing with the secret from the other device's
+    /// QR code. The returned number is typed on the other device; then
+    /// [`Self::pairing_poll`] is called every few seconds.
+    pub async fn pairing_begin(
+        &self,
+        server_url: &str,
+        secret: &str,
+        device_name: &str,
+    ) -> Result<PairingTicket> {
+        if self.state.borrow().session.is_some() {
+            return Err(CoreError::input("this device already has an account"));
+        }
+        let server_url = normalize_server_url(server_url)?;
+        let device_name = check_device_name(device_name)?;
+        let (exchange, message) = self.start_exchange(true, secret)?;
+        self.check_server(&server_url).await?;
+
+        #[derive(Serialize)]
+        struct Request<'a> {
+            device_name: &'a str,
+            pake_msg: String,
+        }
+        #[derive(Deserialize)]
+        struct Created {
+            pairing_id: String,
+            channel: String,
+            poll_token: String,
+            expires_in: u64,
+        }
+        let request = Request {
+            device_name,
+            pake_msg: B64.encode(&message),
+        };
+        let response = self
+            .call(&server_url, "POST", "/v1/pairings", None, Some(&request))
+            .await?;
+        let created: Created = serde_json::from_slice(&response.body)
+            .map_err(|_| CoreError::protocol("unexpected answer from the server"))?;
+        if uuid_bytes(&created.pairing_id).is_none() {
+            return Err(CoreError::protocol("unexpected answer from the server"));
+        }
+        self.state.borrow_mut().joining = Some(Joining {
+            server_url,
+            pairing_id: created.pairing_id,
+            poll_token: created.poll_token,
+            exchange,
+        });
+        Ok(PairingTicket {
+            channel: created.channel,
+            expires_in: created.expires_in,
+        })
+    }
+
+    /// New device: asks whether the other device approved. `true` means this
+    /// device now has the account; `false` means "ask again". Any error ends
+    /// the pairing.
+    pub async fn pairing_poll(&self) -> Result<bool> {
+        let (server_url, pairing_id, poll_token) = match &self.state.borrow().joining {
+            Some(j) => (
+                j.server_url.clone(),
+                j.pairing_id.clone(),
+                j.poll_token.clone(),
+            ),
+            None => return Err(CoreError::input("no pairing is running")),
+        };
+        #[derive(Deserialize)]
+        struct Wrapped {
+            nonce: String,
+            ciphertext: String,
+        }
+        #[derive(Deserialize)]
+        struct Polled {
+            state: String,
+            #[serde(default)]
+            account_id: String,
+            #[serde(default)]
+            device_id: String,
+            #[serde(default)]
+            token: String,
+            #[serde(default)]
+            pake_msg: String,
+            wrapped_account_key: Option<Wrapped>,
+        }
+        #[derive(Deserialize)]
+        struct Parcel {
+            account_id: String,
+            account_key: String,
+        }
+        let path = format!("/v1/pairings/{pairing_id}");
+        let polled = match self
+            .call::<()>(&server_url, "GET", &path, Some(&poll_token), None)
+            .await
+        {
+            Ok(response) => serde_json::from_slice::<Polled>(&response.body)
+                .map_err(|_| CoreError::protocol("unexpected answer from the server")),
+            Err(error) => Err(error),
+        };
+        let polled = match polled {
+            Ok(polled) if polled.state != "approved" => return Ok(false),
+            Ok(polled) => polled,
+            Err(error) => {
+                self.state.borrow_mut().joining = None;
+                return Err(error);
+            }
+        };
+        // Approved. The server made this device and handed out its token;
+        // whether the account key arrives intact decides if it is kept.
+        let Some(joining) = self.state.borrow_mut().joining.take() else {
+            return Err(CoreError::input("no pairing is running"));
+        };
+        let key = (|| {
+            let message = B64.decode(&polled.pake_msg).ok()?;
+            let wrapped = polled.wrapped_account_key.as_ref()?;
+            let nonce = B64.decode(&wrapped.nonce).ok()?;
+            let ciphertext = B64.decode(&wrapped.ciphertext).ok()?;
+            let mut shared = joining.exchange.finish(&message).ok()?;
+            let mut wrap_key = crypto::pairing_key(&shared, &pairing_id);
+            shared.zeroize();
+            let opened = crypto::open(&wrap_key, &nonce, &ciphertext, pairing_id.as_bytes());
+            wrap_key.zeroize();
+            let mut plain = opened?;
+            let parcel = serde_json::from_slice::<Parcel>(&plain);
+            plain.zeroize();
+            let mut parcel = parcel.ok()?;
+            let raw = B64.decode(&parcel.account_key);
+            parcel.account_key.zeroize();
+            let mut raw = raw.ok()?;
+            let key = <[u8; crypto::KEY_LEN]>::try_from(raw.as_slice())
+                .ok()
+                .map(AccountKey);
+            raw.zeroize();
+            // The key must belong to the account the server put this device into.
+            key.filter(|_| parcel.account_id == polled.account_id)
+        })();
+        let Some(key) = key else {
+            // Wrong secret or a tampered message: this device must not stay
+            // in the account. Best effort; the user sees the device list too.
+            let path = format!("/v1/devices/{}", polled.device_id);
+            if uuid_bytes(&polled.device_id).is_some() {
+                let _ = self
+                    .call::<()>(&server_url, "DELETE", &path, Some(&polled.token), None)
+                    .await;
+            }
+            return Err(CoreError::new(
+                "pairing_failed",
+                "the two devices did not agree on the key",
+            ));
+        };
+        let credentials = Credentials {
+            account_id: polled.account_id,
+            device_id: polled.device_id,
+            token: polled.token,
+        };
+        self.start_session(server_url, credentials, key).await?;
+        Ok(true)
+    }
+
+    /// Gives up a pairing that was started or looked up on this device.
+    pub fn pairing_cancel(&self) {
+        let mut state = self.state.borrow_mut();
+        state.joining = None;
+        state.claimed = None;
+    }
+
+    /// Existing device: looks up the pairing whose number the new device
+    /// shows. The user confirms the returned device name before
+    /// [`Self::pairing_approve`].
+    pub async fn pairing_claim(&self, channel: &str) -> Result<PairingRequest> {
+        let (server_url, token) = self.session_endpoint()?;
+        let channel: String = channel
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '-')
+            .collect();
+        if channel.len() != 6 || !channel.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(CoreError::new(
+                "bad_pairing_code",
+                "the code has six digits",
+            ));
+        }
+        #[derive(Serialize)]
+        struct Request<'a> {
+            channel: &'a str,
+        }
+        #[derive(Deserialize)]
+        struct Found {
+            pairing_id: String,
+            device_name: String,
+            pake_msg: String,
+        }
+        let response = self
+            .call(
+                &server_url,
+                "POST",
+                "/v1/pairings/claim",
+                Some(&token),
+                Some(&Request { channel: &channel }),
+            )
+            .await?;
+        let found: Found = serde_json::from_slice(&response.body)
+            .map_err(|_| CoreError::protocol("unexpected answer from the server"))?;
+        let pake_msg = B64
+            .decode(&found.pake_msg)
+            .ok()
+            .filter(|_| uuid_bytes(&found.pairing_id).is_some())
+            .ok_or_else(|| CoreError::protocol("unexpected answer from the server"))?;
+        self.state.borrow_mut().claimed = Some(Claimed {
+            pairing_id: found.pairing_id,
+            pake_msg,
+        });
+        Ok(PairingRequest {
+            device_name: found.device_name,
+        })
+    }
+
+    /// Existing device: sends the account key, wrapped for the device that
+    /// read `secret` from this device's screen. A device that started the
+    /// pairing without the secret gets something it cannot open.
+    pub async fn pairing_approve(&self, secret: &str) -> Result<()> {
+        let (server_url, token) = self.session_endpoint()?;
+        let Some(claimed) = self.state.borrow_mut().claimed.take() else {
+            return Err(CoreError::input("no pairing was looked up"));
+        };
+        let (exchange, message) = self.start_exchange(false, secret)?;
+        let mut shared = exchange.finish(&claimed.pake_msg).map_err(|_| {
+            CoreError::new("pairing_failed", "the other device sent an invalid message")
+        })?;
+        let mut wrap_key = crypto::pairing_key(&shared, &claimed.pairing_id);
+        shared.zeroize();
+        let mut nonce = [0u8; crypto::NONCE_LEN];
+        self.platform
+            .fill_random(&mut nonce)
+            .map_err(|e| CoreError::new("entropy", e.0))?;
+
+        #[derive(Serialize)]
+        struct Parcel<'a> {
+            account_id: &'a str,
+            account_key: String,
+        }
+        let mut plain = {
+            let state = self.state.borrow();
+            let session = state
+                .session
+                .as_ref()
+                .ok_or_else(CoreError::not_signed_in)?;
+            let mut parcel = Parcel {
+                account_id: &session.account_id,
+                account_key: B64.encode(session.key.0),
+            };
+            let plain =
+                serde_json::to_vec(&parcel).map_err(|e| CoreError::new("protocol", e.to_string()));
+            parcel.account_key.zeroize();
+            plain?
+        };
+        let ciphertext = crypto::seal(&wrap_key, &nonce, &plain, claimed.pairing_id.as_bytes());
+        plain.zeroize();
+        wrap_key.zeroize();
+
+        #[derive(Serialize)]
+        struct Wrapped {
+            nonce: String,
+            ciphertext: String,
+        }
+        #[derive(Serialize)]
+        struct Request {
+            pake_msg: String,
+            wrapped_account_key: Wrapped,
+        }
+        let request = Request {
+            pake_msg: B64.encode(&message),
+            wrapped_account_key: Wrapped {
+                nonce: B64.encode(nonce),
+                ciphertext: B64.encode(&ciphertext),
+            },
+        };
+        let path = format!("/v1/pairings/{}/approve", claimed.pairing_id);
+        self.call(&server_url, "POST", &path, Some(&token), Some(&request))
             .await
             .map(|_| ())
     }

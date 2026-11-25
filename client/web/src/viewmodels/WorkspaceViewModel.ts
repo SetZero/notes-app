@@ -5,7 +5,17 @@ import { EditorViewModel } from "./EditorViewModel";
 import { SyncController } from "./SyncController";
 import { ViewModel } from "./ViewModel";
 
-export type Dialog = "devices" | "recovery" | "sign-out" | null;
+export type Dialog = "devices" | "add-device" | "recovery" | "sign-out" | null;
+
+/** Adding a device: show the QR code, look up the new device's number, confirm, done. */
+export interface AddDevice {
+  /** What the QR code holds: this app's address with the pairing secret in the fragment. */
+  link: string;
+  step: "show" | "confirm" | "done";
+  /** The name the new device gave itself, once its number was looked up. */
+  deviceName: string | null;
+  busy: boolean;
+}
 
 export interface WorkspaceState {
   notes: NoteSummary[];
@@ -17,6 +27,7 @@ export interface WorkspaceState {
   editor: EditorViewModel | null;
   dialog: Dialog;
   devices: Device[] | null;
+  addDevice: AddDevice | null;
   /** Shown in the recovery dialog only after the user asks for it. */
   kit: RecoveryKit | null;
   problem: string | null;
@@ -24,6 +35,8 @@ export interface WorkspaceState {
 
 export class WorkspaceViewModel extends ViewModel<WorkspaceState> {
   public readonly sync: SyncController;
+  /** The secret in the QR code that is on screen. */
+  private pairingSecret: string | null = null;
 
   /** @param onSignedOut called after the account was removed from this browser */
   public constructor(
@@ -38,6 +51,7 @@ export class WorkspaceViewModel extends ViewModel<WorkspaceState> {
       editor: null,
       dialog: null,
       devices: null,
+      addDevice: null,
       kit: null,
       problem: null,
     });
@@ -108,7 +122,9 @@ export class WorkspaceViewModel extends ViewModel<WorkspaceState> {
       await this.select(note.note_id);
       this.state.editor?.focusTitle();
     } catch (error) {
-      this.setState({ problem: `The note could not be created (${CoreFailure.from(error).code}).` });
+      this.setState({
+        problem: `The note could not be created (${CoreFailure.from(error).code}).`,
+      });
     }
   }
 
@@ -120,7 +136,9 @@ export class WorkspaceViewModel extends ViewModel<WorkspaceState> {
       await this.notes.deleteNote(noteId);
       this.afterLocalChange();
     } catch (error) {
-      this.setState({ problem: `The note could not be deleted (${CoreFailure.from(error).code}).` });
+      this.setState({
+        problem: `The note could not be deleted (${CoreFailure.from(error).code}).`,
+      });
     }
   }
 
@@ -146,13 +164,88 @@ export class WorkspaceViewModel extends ViewModel<WorkspaceState> {
   // -------------------------------------------------------------- dialogs
 
   public open(dialog: Dialog): void {
+    this.endPairing();
     this.setState({ dialog, kit: null, devices: null, problem: null });
     if (dialog === "devices") void this.loadDevices();
+    if (dialog === "add-device") this.showPairingCode();
   }
 
   public close(): void {
-    // Do not keep the recovery phrase in memory longer than it is shown.
+    // Do not keep the recovery phrase or a pairing secret in memory longer than shown.
+    this.endPairing();
     this.setState({ dialog: null, kit: null, devices: null });
+  }
+
+  // ---------------------------------------------------------- add a device
+
+  /** A new secret and its QR code. Every opening of the dialog has its own. */
+  private showPairingCode(): void {
+    try {
+      this.pairingSecret = this.notes.newPairingSecret();
+      const link = `${window.location.origin}${window.location.pathname}#join=${this.pairingSecret}`;
+      this.setState({
+        addDevice: { link, step: "show", deviceName: null, busy: false },
+      });
+    } catch (error) {
+      this.setState({
+        problem: WorkspaceViewModel.explain(CoreFailure.from(error)),
+      });
+    }
+  }
+
+  private endPairing(): void {
+    if (this.pairingSecret) this.notes.pairingCancel();
+    this.pairingSecret = null;
+    if (this.state.addDevice) this.setState({ addDevice: null });
+  }
+
+  /** Looks up the device that shows `code`, to ask the user about it. */
+  public async findNewDevice(code: string): Promise<void> {
+    await this.pairingStep(async (current) => {
+      const found = await this.notes.pairingClaim(code);
+      this.setState({
+        addDevice: {
+          ...current,
+          step: "confirm",
+          deviceName: found.device_name,
+          busy: false,
+        },
+      });
+    });
+  }
+
+  /** The user said yes: the new device gets the account key. */
+  public async approveNewDevice(): Promise<void> {
+    const secret = this.pairingSecret;
+    if (!secret) return;
+    await this.pairingStep(async (current) => {
+      await this.notes.pairingApprove(secret);
+      this.pairingSecret = null;
+      this.setState({ addDevice: { ...current, step: "done", busy: false } });
+    });
+  }
+
+  private async pairingStep(action: (current: AddDevice) => Promise<void>): Promise<void> {
+    const current = this.state.addDevice;
+    if (!current || current.busy) return;
+    this.setState({ addDevice: { ...current, busy: true }, problem: null });
+    try {
+      await action(current);
+    } catch (error) {
+      // Still open? Then the user may try again with the same QR code.
+      if (this.state.addDevice)
+        this.setState({
+          addDevice: {
+            ...current,
+            step: "show",
+            deviceName: null,
+            busy: false,
+          },
+        });
+      this.setState({
+        problem: WorkspaceViewModel.explain(CoreFailure.from(error)),
+      });
+    }
   }
 
   public revealRecoveryKit(): void {
@@ -163,7 +256,9 @@ export class WorkspaceViewModel extends ViewModel<WorkspaceState> {
     try {
       this.setState({ devices: await this.notes.listDevices() });
     } catch (error) {
-      this.setState({ problem: WorkspaceViewModel.explain(CoreFailure.from(error)) });
+      this.setState({
+        problem: WorkspaceViewModel.explain(CoreFailure.from(error)),
+      });
     }
   }
 
@@ -172,7 +267,9 @@ export class WorkspaceViewModel extends ViewModel<WorkspaceState> {
       await this.notes.revokeDevice(deviceId);
       await this.loadDevices();
     } catch (error) {
-      this.setState({ problem: WorkspaceViewModel.explain(CoreFailure.from(error)) });
+      this.setState({
+        problem: WorkspaceViewModel.explain(CoreFailure.from(error)),
+      });
     }
   }
 
@@ -190,6 +287,18 @@ export class WorkspaceViewModel extends ViewModel<WorkspaceState> {
 
   private static explain(failure: CoreFailure): string {
     switch (failure.code) {
+      case "bad_pairing_code":
+        return "The code has six digits.";
+      case "not_found":
+        return "No device shows this code right now. Check the six digits on the new device.";
+      case "pairing_state_conflict":
+        return "This code was already used. Scan the QR code again on the new device to get a new one.";
+      case "pairing_expired":
+        return "That took too long. Scan the QR code again on the new device.";
+      case "pairing_failed":
+        return "The new device sent something invalid. Scan the QR code again on the new device.";
+      case "rate_limited":
+        return failure.retryAfter ? `Too many attempts. Try again in ${failure.retryAfter} seconds.` : "Too many attempts. Try again in a minute.";
       case "offline":
       case "network":
         return "The server cannot be reached right now.";

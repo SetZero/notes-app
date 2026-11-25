@@ -93,7 +93,11 @@ export class SyncController extends ViewModel<SyncState> {
     this.setState({ phase: "syncing" });
     try {
       const report = await this.notes.sync();
-      this.setState({ phase: "idle", pending: this.notes.status().pending, problem: SyncController.describe(report) });
+      this.setState({
+        phase: "idle",
+        pending: this.notes.status().pending,
+        problem: SyncController.describe(report),
+      });
       if (report.pulled > 0 || report.changed_notes.length > 0) this.onRemoteChange(report);
     } catch (error) {
       this.handleFailure(CoreFailure.from(error));
@@ -119,7 +123,11 @@ export class SyncController extends ViewModel<SyncState> {
       case "unauthorized":
         // The device was revoked from another device. Nothing more to do
         // here until the user signs in again.
-        this.setState({ phase: "revoked", pending, problem: "This device was removed from the account." });
+        this.setState({
+          phase: "revoked",
+          pending,
+          problem: "This device was removed from the account.",
+        });
         this.listener.stop();
         return;
       case "offline":
@@ -128,14 +136,22 @@ export class SyncController extends ViewModel<SyncState> {
         this.request(SyncController.RETRY_OFFLINE_MS);
         return;
       case "rate_limited":
-        this.setState({ phase: "error", pending, problem: "The server is busy. Trying again shortly." });
+        this.setState({
+          phase: "error",
+          pending,
+          problem: "The server is busy. Trying again shortly.",
+        });
         this.request((failure.retryAfter ?? 30) * 1000);
         return;
       case "not_signed_in":
         this.setState({ phase: "idle", pending: 0, problem: null });
         return;
       default:
-        this.setState({ phase: "error", pending, problem: `Sync failed (${failure.code}). Trying again.` });
+        this.setState({
+          phase: "error",
+          pending,
+          problem: `Sync failed (${failure.code}). Trying again.`,
+        });
         this.request(SyncController.RETRY_ERROR_MS);
     }
   }

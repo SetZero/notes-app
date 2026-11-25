@@ -212,7 +212,9 @@ export class EditorViewModel extends ViewModel<EditorState> {
     const joined = { ...previous, text: previous.text + block.text };
     this.cancel(blockId);
     this.cancel(previous.block_id);
-    this.setState({ blocks: this.state.blocks.filter((b) => b.block_id !== blockId).map((b) => (b.block_id === joined.block_id ? joined : b)) });
+    this.setState({
+      blocks: this.state.blocks.filter((b) => b.block_id !== blockId).map((b) => (b.block_id === joined.block_id ? joined : b)),
+    });
     this.focus(previous.block_id, previous.text.length);
     this.enqueue(async () => {
       await this.notes.updateBlock(joined);
@@ -256,7 +258,9 @@ export class EditorViewModel extends ViewModel<EditorState> {
     let previous = after ?? this.state.blocks.at(-1)?.block_id ?? null;
     for (const file of files) {
       if (file.size > EditorViewModel.MAX_ATTACHMENT_BYTES) {
-        this.setState({ problem: `"${file.name}" is larger than 24 MB and cannot be attached.` });
+        this.setState({
+          problem: `"${file.name}" is larger than 24 MB and cannot be attached.`,
+        });
         continue;
       }
       this.setState({ attaching: this.state.attaching + 1 });
@@ -325,7 +329,12 @@ export class EditorViewModel extends ViewModel<EditorState> {
         this.setMedia(blockId, { kind, url, problem: null });
       },
       (error: unknown) => {
-        if (!this.disposed) this.setMedia(blockId, { kind, url: null, problem: EditorViewModel.explainMedia(CoreFailure.from(error)) });
+        if (!this.disposed)
+          this.setMedia(blockId, {
+            kind,
+            url: null,
+            problem: EditorViewModel.explainMedia(CoreFailure.from(error)),
+          });
       },
     );
   }
@@ -366,7 +375,9 @@ export class EditorViewModel extends ViewModel<EditorState> {
 
   private focus(target: string, position: number | "end"): void {
     this.focusSequence += 1;
-    this.setState({ focus: { target, position, sequence: this.focusSequence } });
+    this.setState({
+      focus: { target, position, sequence: this.focusSequence },
+    });
   }
 
   // ------------------------------------------------------------ storage
@@ -419,7 +430,9 @@ export class EditorViewModel extends ViewModel<EditorState> {
   }
 
   private replace(block: Block): void {
-    this.setState({ blocks: this.state.blocks.map((b) => (b.block_id === block.block_id ? block : b)) });
+    this.setState({
+      blocks: this.state.blocks.map((b) => (b.block_id === block.block_id ? block : b)),
+    });
   }
 
   private schedule(key: string): void {
@@ -453,7 +466,10 @@ export class EditorViewModel extends ViewModel<EditorState> {
         if (isLocalChange) this.onLocalChange();
       })
       .catch((error: unknown) => {
-        if (!this.disposed) this.setState({ problem: EditorViewModel.explain(CoreFailure.from(error)) });
+        if (!this.disposed)
+          this.setState({
+            problem: EditorViewModel.explain(CoreFailure.from(error)),
+          });
       });
   }
 

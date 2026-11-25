@@ -71,23 +71,16 @@ export class OidcSignIn {
   private static base64Url(bytes: Uint8Array): string {
     let binary = "";
     for (const byte of bytes) binary += String.fromCharCode(byte);
-    return btoa(binary)
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/, "");
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
 
   private static random(length: number): string {
     return OidcSignIn.base64Url(crypto.getRandomValues(new Uint8Array(length)));
   }
 
-  private static async json(
-    response: Response,
-  ): Promise<Record<string, unknown>> {
+  private static async json(response: Response): Promise<Record<string, unknown>> {
     const body: unknown = await response.json().catch(() => null);
-    return body !== null && typeof body === "object"
-      ? (body as Record<string, unknown>)
-      : {};
+    return body !== null && typeof body === "object" ? (body as Record<string, unknown>) : {};
   }
 
   /** The claim of an ID token that names the user. Not verified here: it is only shown. */
@@ -95,11 +88,7 @@ export class OidcSignIn {
     try {
       const payload = idToken.split(".")[1] ?? "";
       const binary = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
-      const claims = JSON.parse(
-        new TextDecoder().decode(
-          Uint8Array.from(binary, (c) => c.charCodeAt(0)),
-        ),
-      ) as Record<string, unknown>;
+      const claims = JSON.parse(new TextDecoder().decode(Uint8Array.from(binary, (c) => c.charCodeAt(0)))) as Record<string, unknown>;
       for (const claim of ["preferred_username", "email", "name"]) {
         const value = claims[claim];
         if (typeof value === "string" && value) return value.slice(0, 80);
@@ -116,18 +105,10 @@ export class OidcSignIn {
       const response = await fetch(`${this.serverUrl}/v1/meta`, {
         cache: "no-store",
       });
-      const auth = (await OidcSignIn.json(response)).auth as
-        { enrollment?: unknown; oidc?: unknown } | undefined;
-      const enrollment: Enrollment =
-        auth?.enrollment === "oidc" || auth?.enrollment === "either"
-          ? auth.enrollment
-          : "invite";
+      const auth = (await OidcSignIn.json(response)).auth as { enrollment?: unknown; oidc?: unknown } | undefined;
+      const enrollment: Enrollment = auth?.enrollment === "oidc" || auth?.enrollment === "either" ? auth.enrollment : "invite";
       const providers = (Array.isArray(auth?.oidc) ? auth.oidc : []).filter(
-        (p): p is Provider =>
-          typeof p?.id === "string" &&
-          typeof p.issuer === "string" &&
-          typeof p.client_id === "string" &&
-          Array.isArray(p.scopes),
+        (p): p is Provider => typeof p?.id === "string" && typeof p.issuer === "string" && typeof p.client_id === "string" && Array.isArray(p.scopes),
       );
       return { enrollment, providers };
     } catch {
@@ -146,22 +127,13 @@ export class OidcSignIn {
       cache: "no-store",
       credentials: "omit",
     });
-    if (!response.ok)
-      throw new SignInFailure("The sign-in service cannot be reached.");
+    if (!response.ok) throw new SignInFailure("The sign-in service cannot be reached.");
     const document = await OidcSignIn.json(response);
-    const { authorization_endpoint: authorization, token_endpoint: token } =
-      document;
+    const { authorization_endpoint: authorization, token_endpoint: token } = document;
     const origin = new URL(issuer).origin;
-    const own = (url: unknown): url is string =>
-      typeof url === "string" && new URL(url).origin === origin;
-    if (
-      document.issuer !== provider.issuer ||
-      !own(authorization) ||
-      !own(token)
-    ) {
-      throw new SignInFailure(
-        "The sign-in service answered with something unexpected.",
-      );
+    const own = (url: unknown): url is string => typeof url === "string" && new URL(url).origin === origin;
+    if (document.issuer !== provider.issuer || !own(authorization) || !own(token)) {
+      throw new SignInFailure("The sign-in service answered with something unexpected.");
     }
     return { authorization, token };
   }
@@ -174,21 +146,11 @@ export class OidcSignIn {
       body: JSON.stringify({ provider: provider.id }),
     });
     const nonce = (await OidcSignIn.json(nonceResponse)).nonce;
-    if (!nonceResponse.ok || typeof nonce !== "string")
-      throw new SignInFailure(
-        "The server did not start the sign-in. Try again in a minute.",
-      );
+    if (!nonceResponse.ok || typeof nonce !== "string") throw new SignInFailure("The server did not start the sign-in. Try again in a minute.");
     const endpoints = await this.endpoints(provider);
 
     const verifier = OidcSignIn.random(32);
-    const challenge = OidcSignIn.base64Url(
-      new Uint8Array(
-        await crypto.subtle.digest(
-          "SHA-256",
-          new TextEncoder().encode(verifier),
-        ),
-      ),
-    );
+    const challenge = OidcSignIn.base64Url(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))));
     const pending: Pending = {
       provider,
       state: OidcSignIn.random(16),
@@ -219,18 +181,12 @@ export class OidcSignIn {
    * typed if the browser just came back from the provider, `null` if this
    * is an ordinary page load.
    */
-  public async finish(): Promise<
-    { login: Login; draft: Draft } | { failure: string; draft: Draft } | null
-  > {
+  public async finish(): Promise<{ login: Login; draft: Draft } | { failure: string; draft: Draft } | null> {
     const stored = sessionStorage.getItem(OidcSignIn.STORAGE_KEY);
     const answer = new URLSearchParams(window.location.hash.slice(1));
     if (!answer.has("state")) return null;
     // The code is single use: take it out of the address bar and the history.
-    window.history.replaceState(
-      null,
-      "",
-      window.location.pathname + window.location.search,
-    );
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
     sessionStorage.removeItem(OidcSignIn.STORAGE_KEY);
     if (!stored) return null;
     const pending = JSON.parse(stored) as Pending;
@@ -241,33 +197,20 @@ export class OidcSignIn {
       return { login, draft: pending.draft };
     } catch (error) {
       return {
-        failure:
-          error instanceof SignInFailure
-            ? error.message
-            : "The sign-in did not finish. Try again.",
+        failure: error instanceof SignInFailure ? error.message : "The sign-in did not finish. Try again.",
         draft: pending.draft,
       };
     }
   }
 
-  private async redeem(
-    pending: Pending,
-    answer: URLSearchParams,
-  ): Promise<Login> {
+  private async redeem(pending: Pending, answer: URLSearchParams): Promise<Login> {
     const code = answer.get("code");
     if (answer.has("error") || !code) {
-      throw new SignInFailure(
-        answer.get("error") === "access_denied"
-          ? "The sign-in was cancelled."
-          : "The sign-in service refused the sign-in.",
-      );
+      throw new SignInFailure(answer.get("error") === "access_denied" ? "The sign-in was cancelled." : "The sign-in service refused the sign-in.");
     }
     // Providers that name themselves in the answer (RFC 9207) must name the right one.
     const issuer = answer.get("iss");
-    if (issuer !== null && issuer !== pending.provider.issuer)
-      throw new SignInFailure(
-        "The answer came from a different sign-in service.",
-      );
+    if (issuer !== null && issuer !== pending.provider.issuer) throw new SignInFailure("The answer came from a different sign-in service.");
 
     const endpoints = await this.endpoints(pending.provider);
     const response = await fetch(endpoints.token, {
@@ -283,10 +226,7 @@ export class OidcSignIn {
       }),
     });
     const idToken = (await OidcSignIn.json(response)).id_token;
-    if (!response.ok || typeof idToken !== "string")
-      throw new SignInFailure(
-        "The sign-in service did not confirm the sign-in.",
-      );
+    if (!response.ok || typeof idToken !== "string") throw new SignInFailure("The sign-in service did not confirm the sign-in.");
     return {
       provider: pending.provider.id,
       idToken,

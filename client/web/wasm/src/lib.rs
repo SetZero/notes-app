@@ -211,6 +211,41 @@ impl NotesApp {
         promise!(self, |core| core.sign_out(revoke).await.map(|()| JsValue::UNDEFINED))
     }
 
+    /// A fresh secret for adding a device; this device shows it in a QR code.
+    #[wasm_bindgen(js_name = newPairingSecret)]
+    pub fn new_pairing_secret(&self) -> Result<String, JsValue> {
+        self.core.new_pairing_secret().map_err(js_error)
+    }
+
+    /// New device: starts a pairing; resolves to the number to type on the other device.
+    #[wasm_bindgen(js_name = pairingBegin)]
+    pub fn pairing_begin(&self, server_url: String, secret: String, device_name: String) -> js_sys::Promise {
+        promise!(self, |core| core.pairing_begin(&server_url, &secret, &device_name).await.map(|ticket| json(&ticket)))
+    }
+
+    /// New device: `true` once the other device approved and the account is here.
+    #[wasm_bindgen(js_name = pairingPoll)]
+    pub fn pairing_poll(&self) -> js_sys::Promise {
+        promise!(self, |core| core.pairing_poll().await.map(JsValue::from_bool))
+    }
+
+    #[wasm_bindgen(js_name = pairingCancel)]
+    pub fn pairing_cancel(&self) {
+        self.core.pairing_cancel();
+    }
+
+    /// Existing device: looks up the pairing with this number; resolves to the new device's name.
+    #[wasm_bindgen(js_name = pairingClaim)]
+    pub fn pairing_claim(&self, channel: String) -> js_sys::Promise {
+        promise!(self, |core| core.pairing_claim(&channel).await.map(|request| json(&request)))
+    }
+
+    /// Existing device: hands the account key to the device that read `secret`.
+    #[wasm_bindgen(js_name = pairingApprove)]
+    pub fn pairing_approve(&self, secret: String) -> js_sys::Promise {
+        promise!(self, |core| core.pairing_approve(&secret).await.map(|()| JsValue::UNDEFINED))
+    }
+
     #[wasm_bindgen(js_name = listDevices)]
     pub fn list_devices(&self) -> js_sys::Promise {
         promise!(self, |core| core.list_devices().await.map(|devices| json(&devices)))

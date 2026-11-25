@@ -9,13 +9,7 @@ import {
   IconTagOff,
   IconTrash,
 } from "@tabler/icons-react";
-import {
-  useEffect,
-  useRef,
-  type DragEvent,
-  type PointerEvent,
-  type ReactNode,
-} from "react";
+import { useEffect, useRef, type DragEvent, type PointerEvent, type ReactNode } from "react";
 import type { Block } from "../core";
 import type { EditorViewModel, Media } from "../viewmodels/EditorViewModel";
 
@@ -26,8 +20,7 @@ export const BLOCK_DRAG_TYPE = "application/x-notes-block";
  * Where a picture or video sits. The first three keep it on a line of its
  * own; with the last two the blocks that follow flow beside it.
  */
-export type Placement =
-  "left" | "center" | "right" | "wrap-left" | "wrap-right";
+export type Placement = "left" | "center" | "right" | "wrap-left" | "wrap-right";
 
 /** The width a picture gets when text flows around it and none was chosen. */
 const WRAP_WIDTH = 40;
@@ -56,9 +49,7 @@ export function isVisual(media: Media | undefined): boolean {
 export function placementOf(block: Block): Placement {
   if (block.attrs.wrap === "left") return "wrap-left";
   if (block.attrs.wrap === "right") return "wrap-right";
-  return block.attrs.align === "center" || block.attrs.align === "right"
-    ? block.attrs.align
-    : "left";
+  return block.attrs.align === "center" || block.attrs.align === "right" ? block.attrs.align : "left";
 }
 
 export function wraps(placement: Placement): boolean {
@@ -116,22 +107,16 @@ export function Attachment({ editor, block, media, draft, onDraft }: Props) {
         : placement === "center"
           ? 2 * (event.clientX - (rect.left + rect.width / 2))
           : event.clientX - rect.left;
-    onDraft(
-      Math.round(
-        Math.min(100, Math.max(10, (pixels / note.clientWidth) * 100)),
-      ),
-    );
+    onDraft(Math.round(Math.min(100, Math.max(10, (pixels / note.clientWidth) * 100))));
   };
 
   const endResize = () => {
-    if (draft !== null)
-      editor.setDisplay(block.block_id, { width: String(draft) });
+    if (draft !== null) editor.setDisplay(block.block_id, { width: String(draft) });
     onDraft(null);
   };
 
   const place = (next: Placement) => {
-    const wrap =
-      next === "wrap-left" ? "left" : next === "wrap-right" ? "right" : "";
+    const wrap = next === "wrap-left" ? "left" : next === "wrap-right" ? "right" : "";
     editor.setDisplay(block.block_id, {
       wrap,
       align: wrap || next === "left" ? "" : next,
@@ -142,14 +127,9 @@ export function Attachment({ editor, block, media, draft, onDraft }: Props) {
   if (media?.problem) {
     body = <p className="problem">{media.problem}</p>;
   } else if (media?.url) {
-    if (media.kind === "image")
-      body = (
-        <img src={media.url} alt={name} draggable onDragStart={startDrag} />
-      );
-    else if (media.kind === "audio")
-      body = <audio src={media.url} controls preload="metadata" />;
-    else if (media.kind === "video")
-      body = <video src={media.url} controls preload="metadata" />;
+    if (media.kind === "image") body = <img src={media.url} alt={name} draggable onDragStart={startDrag} />;
+    else if (media.kind === "audio") body = <audio src={media.url} controls preload="metadata" />;
+    else if (media.kind === "video") body = <video src={media.url} controls preload="metadata" />;
     else body = <></>;
   }
 
@@ -165,13 +145,7 @@ export function Attachment({ editor, block, media, draft, onDraft }: Props) {
       {visual && media?.url && (
         <div className="toolbar" role="toolbar" aria-label="Picture">
           {PLACEMENTS.map(([value, label, glyph]) => (
-            <button
-              key={value}
-              aria-label={label}
-              title={label}
-              aria-pressed={placement === value}
-              onClick={() => place(value)}
-            >
+            <button key={value} aria-label={label} title={label} aria-pressed={placement === value} onClick={() => place(value)}>
               {glyph}
             </button>
           ))}
@@ -185,12 +159,8 @@ export function Attachment({ editor, block, media, draft, onDraft }: Props) {
             <IconAspectRatio {...ICON} />
           </button>
           <button
-            aria-label={
-              hidden ? "Show the file name below" : "Hide the file name below"
-            }
-            title={
-              hidden ? "Show the file name below" : "Hide the file name below"
-            }
+            aria-label={hidden ? "Show the file name below" : "Hide the file name below"}
+            title={hidden ? "Show the file name below" : "Hide the file name below"}
             aria-pressed={!hidden}
             onClick={() =>
               editor.setDisplay(block.block_id, {
@@ -201,11 +171,7 @@ export function Attachment({ editor, block, media, draft, onDraft }: Props) {
             {hidden ? <IconTagOff {...ICON} /> : <IconTag {...ICON} />}
           </button>
           <span className="rule" />
-          <button
-            aria-label="Delete"
-            title="Delete"
-            onClick={() => editor.removeBlock(block.block_id)}
-          >
+          <button aria-label="Delete" title="Delete" onClick={() => editor.removeBlock(block.block_id)}>
             <IconTrash {...ICON} />
           </button>
         </div>
@@ -239,30 +205,18 @@ export function Attachment({ editor, block, media, draft, onDraft }: Props) {
 }
 
 /** The controls beside an attachment that is not a picture: only its caption. */
-export function AttachmentTools({
-  editor,
-  block,
-  media,
-}: {
-  editor: EditorViewModel;
-  block: Block;
-  media: Media | undefined;
-}) {
+export function AttachmentTools({ editor, block, media }: { editor: EditorViewModel; block: Block; media: Media | undefined }) {
   // A plain file has nothing but its name to show.
   if (!media || media.kind === "file") return null;
   const hidden = block.attrs.caption === "hidden";
-  const label = hidden
-    ? "Show the file name below"
-    : "Hide the file name below";
+  const label = hidden ? "Show the file name below" : "Hide the file name below";
   return (
     <button
       className="icon"
       aria-pressed={!hidden}
       aria-label={label}
       title={label}
-      onClick={() =>
-        editor.setDisplay(block.block_id, { caption: hidden ? "" : "hidden" })
-      }
+      onClick={() => editor.setDisplay(block.block_id, { caption: hidden ? "" : "hidden" })}
     >
       {hidden ? <IconTagOff {...ICON} /> : <IconTag {...ICON} />}
     </button>

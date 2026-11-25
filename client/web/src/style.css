@@ -1235,3 +1235,58 @@ button.icon {
   margin: 0;
   font-size: 0.85rem;
 }
+
+/* ---- adding a device */
+
+.qr {
+  display: block;
+  width: min(15rem, 70vw);
+  margin: 0 auto 0.8rem;
+  border: 2px solid var(--ink);
+  border-radius: 6px;
+  box-shadow: var(--shadow-small);
+}
+
+.pairing ol {
+  margin: 0 0 0.6rem;
+  padding-left: 1.3rem;
+}
+
+.pairing .hint {
+  font-size: 0.85rem;
+  margin: 0.5rem 0 0;
+}
+
+input.code {
+  font-size: 1.5rem;
+  letter-spacing: 0.3em;
+  text-align: center;
+}
+
+.channel {
+  font-family: var(--mono);
+  font-size: 2.6rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-align: center;
+  margin: 0.6rem 0;
+  padding: 0.5rem;
+  border: 2px dashed var(--accent);
+  border-radius: 8px;
+  color: var(--accent);
+}
+
+.pairing details.link {
+  margin: 0 0 0.6rem;
+  font-size: 0.9rem;
+}
+
+.pairing details.link summary {
+  cursor: pointer;
+  color: var(--accent-2);
+}
+
+.pairing details.link input {
+  width: 100%;
+  font-size: 0.75rem;
+}

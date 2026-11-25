@@ -515,3 +515,51 @@ impl<'a> std::ops::Deref for Device<'a> {
         &self.core
     }
 }
+
+#[tokio::test]
+async fn a_device_is_added_by_pairing_and_only_with_the_secret() {
+    let app = app().await;
+    let laptop = device(&app).await;
+    laptop.core.create_account(SERVER, INVITE, "laptop").await.unwrap();
+    let note = laptop.core.create_note("").await.unwrap();
+    laptop.core.set_title(&note.note_id, "Only for my devices").await.unwrap();
+    laptop.core.sync().await.unwrap();
+
+    // The laptop shows a secret; the phone reads it and gets a number to type.
+    let secret = laptop.core.new_pairing_secret().unwrap();
+    let phone = device(&app).await;
+    let ticket = phone.core.pairing_begin(SERVER, &secret, "phone").await.unwrap();
+    assert_eq!(ticket.channel.len(), 6);
+    assert!(!phone.core.pairing_poll().await.unwrap(), "nobody approved yet");
+
+    let request = laptop.core.pairing_claim(&ticket.channel).await.unwrap();
+    assert_eq!(request.device_name, "phone");
+    assert!(!phone.core.pairing_poll().await.unwrap(), "looked up, not approved");
+    laptop.core.pairing_approve(&secret).await.unwrap();
+
+    assert!(phone.core.pairing_poll().await.unwrap());
+    assert!(phone.core.status().signed_in);
+    phone.core.sync().await.unwrap();
+    assert_eq!(phone.core.list_notes()[0].title, "Only for my devices");
+    assert_eq!(laptop.core.list_devices().await.unwrap().len(), 2);
+    // The pairing is used up.
+    assert_eq!(phone.core.pairing_poll().await.err().unwrap().code, "input");
+
+    // Someone who started a pairing without seeing the secret gets nothing,
+    // even if the owner is talked into typing their number and approving.
+    let stranger = device(&app).await;
+    let guessed = stranger.core.new_pairing_secret().unwrap();
+    let ticket = stranger.core.pairing_begin(SERVER, &guessed, "totally my tablet").await.unwrap();
+    let shown = laptop.core.new_pairing_secret().unwrap();
+    laptop.core.pairing_claim(&ticket.channel).await.unwrap();
+    laptop.core.pairing_approve(&shown).await.unwrap();
+    assert_eq!(stranger.core.pairing_poll().await.err().unwrap().code, "pairing_failed");
+    assert!(!stranger.core.status().signed_in);
+    // The device the server created for it removed itself again.
+    assert_eq!(laptop.core.list_devices().await.unwrap().len(), 2);
+
+    // Input that cannot be a secret or a number is refused before any request.
+    assert_eq!(stranger.core.pairing_begin(SERVER, "not-a-secret", "x").await.err().unwrap().code, "bad_pairing_link");
+    assert_eq!(laptop.core.pairing_claim("12345").await.err().unwrap().code, "bad_pairing_code");
+    assert_eq!(laptop.core.pairing_approve(&shown).await.err().unwrap().code, "input");
+}

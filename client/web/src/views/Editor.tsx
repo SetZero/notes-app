@@ -1,24 +1,9 @@
-import {
-  useEffect,
-  useRef,
-  useState,
-  type ClipboardEvent,
-  type DragEvent,
-  type KeyboardEvent,
-} from "react";
+import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
 import type { Block, BlockKind } from "../core";
 import type { EditorViewModel } from "../viewmodels/EditorViewModel";
 import { useViewModel } from "../viewmodels/ViewModel";
 import { IconGripVertical, IconX } from "@tabler/icons-react";
-import {
-  Attachment,
-  AttachmentTools,
-  BLOCK_DRAG_TYPE,
-  isVisual,
-  placementOf,
-  widthOf,
-  wraps,
-} from "./Attachment";
+import { Attachment, AttachmentTools, BLOCK_DRAG_TYPE, isVisual, placementOf, widthOf, wraps } from "./Attachment";
 import { AutoTextarea } from "./AutoTextarea";
 
 const KINDS: [BlockKind, string][] = [
@@ -31,16 +16,12 @@ const KINDS: [BlockKind, string][] = [
 /** True when the caret has no line above (direction -1) or below (1) it. */
 function atEdge(area: HTMLTextAreaElement, direction: -1 | 1): boolean {
   if (area.selectionStart !== area.selectionEnd) return false;
-  return direction === -1
-    ? !area.value.slice(0, area.selectionStart).includes("\n")
-    : !area.value.slice(area.selectionEnd).includes("\n");
+  return direction === -1 ? !area.value.slice(0, area.selectionStart).includes("\n") : !area.value.slice(area.selectionEnd).includes("\n");
 }
 
 /** The block a paste or drop happened in, so files land right below it. */
 function blockAt(target: EventTarget): string | null {
-  return target instanceof Element
-    ? (target.closest<HTMLElement>("[data-block-id]")?.dataset.blockId ?? null)
-    : null;
+  return target instanceof Element ? (target.closest<HTMLElement>("[data-block-id]")?.dataset.blockId ?? null) : null;
 }
 
 export function Editor({ editor }: { editor: EditorViewModel }) {
@@ -62,12 +43,9 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
   const focus = state.focus;
   useEffect(() => {
     if (!focus) return;
-    const area = container.current?.querySelector<HTMLTextAreaElement>(
-      `[data-focus-id="${CSS.escape(focus.target)}"]`,
-    );
+    const area = container.current?.querySelector<HTMLTextAreaElement>(`[data-focus-id="${CSS.escape(focus.target)}"]`);
     if (!area) return;
-    const position =
-      focus.position === "end" ? area.value.length : focus.position;
+    const position = focus.position === "end" ? area.value.length : focus.position;
     area.focus();
     area.setSelectionRange(position, position);
     // Only when a new request arrives, not on every render.
@@ -89,19 +67,12 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
     editor.attachFiles(files, blockAt(event.target));
   };
 
-  const hasFiles = (event: DragEvent) =>
-    event.dataTransfer.types.includes("Files");
-  const hasBlock = (event: DragEvent) =>
-    event.dataTransfer.types.includes(BLOCK_DRAG_TYPE);
+  const hasFiles = (event: DragEvent) => event.dataTransfer.types.includes("Files");
+  const hasBlock = (event: DragEvent) => event.dataTransfer.types.includes(BLOCK_DRAG_TYPE);
 
   /** The block under the pointer and the half of it the pointer is in. */
-  const landingAt = (
-    event: DragEvent,
-  ): { blockId: string; place: "before" | "after" } | null => {
-    const row =
-      event.target instanceof Element
-        ? event.target.closest<HTMLElement>("[data-block-id]")
-        : null;
+  const landingAt = (event: DragEvent): { blockId: string; place: "before" | "after" } | null => {
+    const row = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-block-id]") : null;
     const blockId = row?.dataset.blockId ?? state.blocks.at(-1)?.block_id;
     if (!blockId) return null;
     if (!row) return { blockId, place: "after" };
@@ -117,8 +88,7 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
       event.preventDefault();
       event.dataTransfer.dropEffect = "move";
       const next = landingAt(event);
-      if (next?.blockId !== landing?.blockId || next?.place !== landing?.place)
-        setLanding(next);
+      if (next?.blockId !== landing?.blockId || next?.place !== landing?.place) setLanding(next);
     } else if (hasFiles(event)) {
       event.preventDefault();
       event.dataTransfer.dropEffect = "copy";
@@ -131,12 +101,7 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
       event.preventDefault();
       const target = landingAt(event);
       setLanding(null);
-      if (target)
-        editor.moveBlock(
-          event.dataTransfer.getData(BLOCK_DRAG_TYPE),
-          target.blockId,
-          target.place,
-        );
+      if (target) editor.moveBlock(event.dataTransfer.getData(BLOCK_DRAG_TYPE), target.blockId, target.place);
     } else if (hasFiles(event)) {
       event.preventDefault();
       setDragging(false);
@@ -152,49 +117,28 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
   };
 
   const titleKey = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (
-      event.key === "Enter" ||
-      (event.key === "ArrowDown" && atEdge(event.currentTarget, 1))
-    ) {
+    if (event.key === "Enter" || (event.key === "ArrowDown" && atEdge(event.currentTarget, 1))) {
       event.preventDefault();
       if (state.blocks.length === 0) editor.appendBlock();
       else editor.moveFocus("title", 1);
     }
   };
 
-  const blockKey = (
-    block: Block,
-    event: KeyboardEvent<HTMLTextAreaElement>,
-  ) => {
+  const blockKey = (block: Block, event: KeyboardEvent<HTMLTextAreaElement>) => {
     const area = event.currentTarget;
     if (event.nativeEvent.isComposing) return;
     const modifier = event.ctrlKey || event.metaKey;
     // In code, Enter is a line break; Ctrl+Enter leaves the block.
-    if (
-      event.key === "Enter" &&
-      !event.shiftKey &&
-      (block.kind !== "code" || modifier)
-    ) {
+    if (event.key === "Enter" && !event.shiftKey && (block.kind !== "code" || modifier)) {
       event.preventDefault();
-      editor.splitBlock(
-        block.block_id,
-        block.kind === "code" ? area.value.length : area.selectionStart,
-      );
-    } else if (
-      event.key === "Backspace" &&
-      area.selectionStart === 0 &&
-      area.selectionEnd === 0
-    ) {
+      editor.splitBlock(block.block_id, block.kind === "code" ? area.value.length : area.selectionStart);
+    } else if (event.key === "Backspace" && area.selectionStart === 0 && area.selectionEnd === 0) {
       event.preventDefault();
       editor.backspaceAtStart(block.block_id);
     } else if (event.key === "ArrowUp" && !event.shiftKey && atEdge(area, -1)) {
       event.preventDefault();
       editor.moveFocus(block.block_id, -1);
-    } else if (
-      event.key === "ArrowDown" &&
-      !event.shiftKey &&
-      atEdge(area, 1)
-    ) {
+    } else if (event.key === "ArrowDown" && !event.shiftKey && atEdge(area, 1)) {
       const last = state.blocks.at(-1)?.block_id === block.block_id;
       if (last) return;
       event.preventDefault();
@@ -236,8 +180,7 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
           const media = state.media[block.block_id];
           const picture = block.kind === "attachment" && isVisual(media);
           const placement = picture ? placementOf(block) : null;
-          const draft =
-            resizing?.blockId === block.block_id ? resizing.width : null;
+          const draft = resizing?.blockId === block.block_id ? resizing.width : null;
           // A picture with text around it floats; the row itself has the width.
           const floating = placement !== null && wraps(placement);
           return (
@@ -245,26 +188,13 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
               key={block.block_id}
               data-block-id={block.block_id}
               className={`block ${block.kind}${block.attrs.done === "true" ? " done" : ""}${floating ? ` ${placement}` : ""}${landing?.blockId === block.block_id ? ` land-${landing.place}` : ""}`}
-              style={
-                floating ? { width: `${draft ?? widthOf(block)}%` } : undefined
-              }
+              style={floating ? { width: `${draft ?? widthOf(block)}%` } : undefined}
             >
-              <span
-                className="grip"
-                draggable
-                title="Drag to move"
-                aria-hidden="true"
-                onDragStart={(e) => startBlockDrag(block.block_id, e)}
-              >
+              <span className="grip" draggable title="Drag to move" aria-hidden="true" onDragStart={(e) => startBlockDrag(block.block_id, e)}>
                 <IconGripVertical size={16} stroke={1.75} />
               </span>
               {block.kind === "todo" && (
-                <input
-                  type="checkbox"
-                  aria-label="Done"
-                  checked={block.attrs.done === "true"}
-                  onChange={() => editor.toggleDone(block.block_id)}
-                />
+                <input type="checkbox" aria-label="Done" checked={block.attrs.done === "true"} onChange={() => editor.toggleDone(block.block_id)} />
               )}
               {block.kind === "attachment" ? (
                 <Attachment
@@ -272,61 +202,26 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
                   block={block}
                   media={media}
                   draft={draft}
-                  onDraft={(width) =>
-                    setResizing(
-                      width === null
-                        ? null
-                        : { blockId: block.block_id, width },
-                    )
-                  }
+                  onDraft={(width) => setResizing(width === null ? null : { blockId: block.block_id, width })}
                 />
               ) : (
                 <AutoTextarea
                   data-focus-id={block.block_id}
                   className={block.kind}
                   value={block.text}
-                  placeholder={
-                    block.kind === "heading"
-                      ? "Heading"
-                      : block.kind === "todo"
-                        ? "To-do"
-                        : block.kind === "code"
-                          ? "Code"
-                          : ""
-                  }
+                  placeholder={block.kind === "heading" ? "Heading" : block.kind === "todo" ? "To-do" : block.kind === "code" ? "Code" : ""}
                   aria-label={block.kind}
                   spellCheck={block.kind !== "code"}
-                  onChange={(e) =>
-                    editor.editBlock(
-                      block.block_id,
-                      e.target.value,
-                      e.target.selectionStart,
-                    )
-                  }
+                  onChange={(e) => editor.editBlock(block.block_id, e.target.value, e.target.selectionStart)}
                   onKeyDown={(e) => blockKey(block, e)}
                 />
               )}
               {/* A picture has its own toolbar floating on it. */}
               {!picture && (
                 <div className="tools">
-                  {block.kind === "attachment" && (
-                    <AttachmentTools
-                      editor={editor}
-                      block={block}
-                      media={media}
-                    />
-                  )}
+                  {block.kind === "attachment" && <AttachmentTools editor={editor} block={block} media={media} />}
                   {block.kind !== "attachment" && (
-                    <select
-                      aria-label="Block type"
-                      value={block.kind}
-                      onChange={(e) =>
-                        editor.setKind(
-                          block.block_id,
-                          e.target.value as BlockKind,
-                        )
-                      }
-                    >
+                    <select aria-label="Block type" value={block.kind} onChange={(e) => editor.setKind(block.block_id, e.target.value as BlockKind)}>
                       {KINDS.map(([kind, label]) => (
                         <option key={kind} value={kind}>
                           {label}
@@ -334,12 +229,7 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
                       ))}
                     </select>
                   )}
-                  <button
-                    className="icon"
-                    aria-label="Delete block"
-                    title="Delete block"
-                    onClick={() => editor.removeBlock(block.block_id)}
-                  >
+                  <button className="icon" aria-label="Delete block" title="Delete block" onClick={() => editor.removeBlock(block.block_id)}>
                     <IconX size={16} stroke={1.75} aria-hidden />
                   </button>
                 </div>
@@ -349,18 +239,9 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
         })}
       </div>
 
-      {state.attaching > 0 && (
-        <p className="muted">
-          Encrypting{" "}
-          {state.attaching === 1 ? "file" : `${state.attaching} files`}…
-        </p>
-      )}
+      {state.attaching > 0 && <p className="muted">Encrypting {state.attaching === 1 ? "file" : `${state.attaching} files`}…</p>}
 
-      <button
-        className="tail"
-        aria-label="Add text at the end"
-        onClick={() => editor.appendBlock()}
-      />
+      <button className="tail" aria-label="Add text at the end" onClick={() => editor.appendBlock()} />
     </div>
   );
 }

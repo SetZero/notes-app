@@ -40,6 +40,16 @@ impl Drop for AccountKey {
     }
 }
 
+/// The key that wraps the account key on its way to a device being paired:
+/// HKDF-SHA256 of the SPAKE2 result, bound to the pairing it belongs to.
+pub fn pairing_key(shared: &[u8], pairing_id: &str) -> [u8; KEY_LEN] {
+    let mut out = [0u8; KEY_LEN];
+    Hkdf::<Sha256>::new(None, shared)
+        .expand_multi_info(&[b"notes/pairing/v1/", pairing_id.as_bytes()], &mut out)
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    out
+}
+
 fn expand(ak: &AccountKey, info: &[&[u8]]) -> [u8; KEY_LEN] {
     let mut out = [0u8; KEY_LEN];
     Hkdf::<Sha256>::new(None, &ak.0)
