@@ -274,6 +274,12 @@ impl NotesApp {
         })
     }
 
+    /// Moves a block behind `after`, or to the top of its note without it.
+    #[wasm_bindgen(js_name = moveBlock)]
+    pub fn move_block(&self, block_id: String, after: Option<String>) -> js_sys::Promise {
+        promise!(self, |core| core.move_block(&block_id, after.as_deref()).await.map(|()| JsValue::UNDEFINED))
+    }
+
     #[wasm_bindgen(js_name = deleteBlock)]
     pub fn delete_block(&self, block_id: String) -> js_sys::Promise {
         promise!(self, |core| core.delete_block(&block_id).await.map(|()| JsValue::UNDEFINED))

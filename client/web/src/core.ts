@@ -171,6 +171,11 @@ export class Notes {
     await this.app.updateBlock(block.block_id, block.kind, block.text, JSON.stringify(block.attrs));
   }
 
+  /** Moves a block behind `after`, or to the top of its note without it. */
+  public async moveBlock(blockId: string, after: string | null): Promise<void> {
+    await this.app.moveBlock(blockId, after ?? undefined);
+  }
+
   public async deleteBlock(blockId: string): Promise<void> {
     await this.app.deleteBlock(blockId);
   }

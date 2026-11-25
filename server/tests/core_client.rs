@@ -469,6 +469,46 @@ async fn folders_are_part_of_the_note_and_sync_with_it() {
     assert_eq!(a.set_folder(&loose.note_id, &"x".repeat(300)).await.err().unwrap().code, "input");
 }
 
+#[tokio::test]
+async fn blocks_can_be_moved_and_attachments_restyled() {
+    let app = app().await;
+    let a = device(&app).await;
+    let kit = a.create_account(SERVER, INVITE, "first").await.unwrap();
+    let note = a.create_note("").await.unwrap();
+    let one = note.blocks[0].block_id.clone();
+    a.update_block(&one, "paragraph", "one", BTreeMap::new()).await.unwrap();
+    let two = a.insert_block(&note.note_id, Some(&one), "paragraph", "two").await.unwrap().block_id;
+    let pic = a.add_attachment(&note.note_id, Some(&two), "pic.png", "image/png", b"not really a png").await.unwrap();
+
+    a.move_block(&pic.block_id, None).await.unwrap();
+    assert_eq!(texts(&a, &note.note_id), ["pic.png", "one", "two"]);
+    a.move_block(&one, Some(&two)).await.unwrap();
+    assert_eq!(texts(&a, &note.note_id), ["pic.png", "two", "one"]);
+    a.move_block(&pic.block_id, Some(&two)).await.unwrap();
+    assert_eq!(texts(&a, &note.note_id), ["two", "pic.png", "one"]);
+    // Behind itself, or behind a block that is gone: nothing breaks.
+    a.move_block(&two, Some(&two)).await.unwrap();
+    a.move_block(&two, Some("00000000-0000-4000-8000-000000000000")).await.unwrap();
+    assert_eq!(texts(&a, &note.note_id), ["pic.png", "one", "two"]);
+
+    // How an attachment is shown may change; which file it is may not.
+    let mut attrs = pic.attrs.clone();
+    attrs.insert("width".into(), "40".into());
+    attrs.insert("caption".into(), "hidden".into());
+    a.update_block(&pic.block_id, "attachment", "pic.png", attrs.clone()).await.unwrap();
+    attrs.insert("mime".into(), "text/html".into());
+    assert_eq!(a.update_block(&pic.block_id, "attachment", "pic.png", attrs).await.err().unwrap().code, "input");
+
+    a.sync().await.unwrap();
+    let b = device(&app).await;
+    b.recover(SERVER, &kit.account_id, &kit.phrase, "second").await.unwrap();
+    b.sync().await.unwrap();
+    assert_eq!(texts(&b, &note.note_id), ["pic.png", "one", "two"]);
+    let seen = b.get_note(&note.note_id).unwrap();
+    assert_eq!(seen.blocks[0].attrs["width"], "40");
+    assert_eq!(b.attachment(&seen.blocks[0].block_id).await.unwrap(), b"not really a png");
+}
+
 impl<'a> std::ops::Deref for Device<'a> {
     type Target = Core<TestPlatform<'a>>;
     fn deref(&self) -> &Self::Target {

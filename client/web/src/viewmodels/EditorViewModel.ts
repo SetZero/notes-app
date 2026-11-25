@@ -276,6 +276,41 @@ export class EditorViewModel extends ViewModel<EditorState> {
     }
   }
 
+  /**
+   * Changes how an attachment is shown: `width` (percent of the note's
+   * width), `align` (left, center, right) and `caption` ("hidden").
+   * An empty value removes the attribute.
+   */
+  public setDisplay(blockId: string, change: Record<string, string>): void {
+    const block = this.find(blockId);
+    if (!block || block.kind !== "attachment") return;
+    const attrs = { ...block.attrs };
+    for (const [name, value] of Object.entries(change)) {
+      if (value === "") delete attrs[name];
+      else attrs[name] = value;
+    }
+    this.replace({ ...block, attrs });
+    this.saveNow(blockId);
+  }
+
+  /** Moves a block to just before or just after another one. */
+  public moveBlock(blockId: string, targetId: string, place: "before" | "after"): void {
+    if (blockId === targetId) return;
+    const moving = this.find(blockId);
+    if (!moving) return;
+    const blocks = this.state.blocks.filter((b) => b.block_id !== blockId);
+    const target = blocks.findIndex((b) => b.block_id === targetId);
+    if (target < 0) return;
+    const index = place === "before" ? target : target + 1;
+    blocks.splice(index, 0, moving);
+    if (blocks.every((b, i) => b === this.state.blocks[i])) return;
+    const after = blocks[index - 1]?.block_id ?? null;
+    // Pending text of the moved block must reach the core before the move.
+    if (this.timers.has(blockId)) this.saveNow(blockId);
+    this.setState({ blocks });
+    this.enqueue(() => this.notes.moveBlock(blockId, after));
+  }
+
   /** Decrypts an attachment for display. The view calls this when it shows one. */
   public loadMedia(blockId: string): void {
     const block = this.find(blockId);

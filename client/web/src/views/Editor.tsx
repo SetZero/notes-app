@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type 
 import type { Block, BlockKind } from "../core";
 import type { EditorViewModel } from "../viewmodels/EditorViewModel";
 import { useViewModel } from "../viewmodels/ViewModel";
-import { Attachment } from "./Attachment";
+import { Attachment, AttachmentTools, BLOCK_DRAG_TYPE } from "./Attachment";
 import { AutoTextarea } from "./AutoTextarea";
 
 const KINDS: [BlockKind, string][] = [
@@ -27,6 +27,8 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
   const state = useViewModel(editor);
   const container = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState(false);
+  // Where a block that is being dragged would land.
+  const [landing, setLanding] = useState<{ blockId: string; place: "before" | "after" } | null>(null);
 
   // Put the caret where the view model asked for it.
   const focus = state.focus;
@@ -57,19 +59,49 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
   };
 
   const hasFiles = (event: DragEvent) => event.dataTransfer.types.includes("Files");
+  const hasBlock = (event: DragEvent) => event.dataTransfer.types.includes(BLOCK_DRAG_TYPE);
+
+  /** The block under the pointer and the half of it the pointer is in. */
+  const landingAt = (event: DragEvent): { blockId: string; place: "before" | "after" } | null => {
+    const row = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-block-id]") : null;
+    const blockId = row?.dataset.blockId ?? state.blocks.at(-1)?.block_id;
+    if (!blockId) return null;
+    if (!row) return { blockId, place: "after" };
+    const rect = row.getBoundingClientRect();
+    return { blockId, place: event.clientY < rect.top + rect.height / 2 ? "before" : "after" };
+  };
 
   const dragOver = (event: DragEvent<HTMLDivElement>) => {
-    if (!hasFiles(event)) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
-    setDragging(true);
+    if (hasBlock(event)) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      const next = landingAt(event);
+      if (next?.blockId !== landing?.blockId || next?.place !== landing?.place) setLanding(next);
+    } else if (hasFiles(event)) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      setDragging(true);
+    }
   };
 
   const drop = (event: DragEvent<HTMLDivElement>) => {
-    if (!hasFiles(event)) return;
-    event.preventDefault();
-    setDragging(false);
-    editor.attachFiles([...event.dataTransfer.files], blockAt(event.target));
+    if (hasBlock(event)) {
+      event.preventDefault();
+      const target = landingAt(event);
+      setLanding(null);
+      if (target) editor.moveBlock(event.dataTransfer.getData(BLOCK_DRAG_TYPE), target.blockId, target.place);
+    } else if (hasFiles(event)) {
+      event.preventDefault();
+      setDragging(false);
+      editor.attachFiles([...event.dataTransfer.files], blockAt(event.target));
+    }
+  };
+
+  const startBlockDrag = (blockId: string, event: DragEvent<HTMLElement>) => {
+    event.dataTransfer.setData(BLOCK_DRAG_TYPE, blockId);
+    event.dataTransfer.effectAllowed = "move";
+    const row = event.currentTarget.closest<HTMLElement>("[data-block-id]");
+    if (row) event.dataTransfer.setDragImage(row, 0, 0);
   };
 
   const titleKey = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -109,6 +141,7 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
       onPaste={paste}
       onDragOver={dragOver}
       onDragLeave={() => setDragging(false)}
+      onDragEnd={() => setLanding(null)}
       onDrop={drop}
     >
       {state.problem && (
@@ -131,7 +164,14 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
       />
 
       {state.blocks.map((block) => (
-        <div key={block.block_id} data-block-id={block.block_id} className={`block ${block.kind}${block.attrs.done === "true" ? " done" : ""}`}>
+        <div
+          key={block.block_id}
+          data-block-id={block.block_id}
+          className={`block ${block.kind}${block.attrs.done === "true" ? " done" : ""}${landing?.blockId === block.block_id ? ` land-${landing.place}` : ""}`}
+        >
+          <span className="grip" draggable title="Drag to move" aria-hidden="true" onDragStart={(e) => startBlockDrag(block.block_id, e)}>
+            ⠿
+          </span>
           {block.kind === "todo" && (
             <input type="checkbox" aria-label="Done" checked={block.attrs.done === "true"} onChange={() => editor.toggleDone(block.block_id)} />
           )}
@@ -150,6 +190,7 @@ export function Editor({ editor }: { editor: EditorViewModel }) {
             />
           )}
           <div className="tools">
+            {block.kind === "attachment" && <AttachmentTools editor={editor} block={block} media={state.media[block.block_id]} />}
             {block.kind !== "attachment" && (
               <select aria-label="Block type" value={block.kind} onChange={(e) => editor.setKind(block.block_id, e.target.value as BlockKind)}>
                 {KINDS.map(([kind, label]) => (

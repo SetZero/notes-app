@@ -542,6 +542,91 @@ label textarea {
   color: var(--accent);
 }
 
+.media.visual {
+  position: relative;
+  flex: 0 1 auto;
+  max-width: 100%;
+}
+
+/* Without a chosen width a picture is as large as its file, up to the note's width. */
+.media.visual.sized img,
+.media.visual.sized video {
+  width: 100%;
+}
+
+.media.align-center {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.media.align-right {
+  margin-left: auto;
+}
+
+.media img {
+  cursor: grab;
+}
+
+.media .resize {
+  position: absolute;
+  right: -5px;
+  bottom: 1.4rem;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg);
+  cursor: nwse-resize;
+  touch-action: none;
+  opacity: 0;
+}
+
+.media.align-right .resize {
+  right: auto;
+  left: -5px;
+  cursor: nesw-resize;
+}
+
+.block:hover .resize,
+.block:focus-within .resize,
+.media .resize:active {
+  opacity: 1;
+}
+
+button.icon.small {
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------ moving blocks */
+
+.block {
+  position: relative;
+}
+
+.block .grip {
+  position: absolute;
+  left: -1.1rem;
+  top: 0.2rem;
+  color: var(--muted);
+  cursor: grab;
+  user-select: none;
+  opacity: 0;
+}
+
+.block:hover .grip,
+.block:focus-within .grip {
+  opacity: 0.7;
+}
+
+.block.land-before {
+  box-shadow: 0 -2px 0 var(--accent);
+}
+
+.block.land-after {
+  box-shadow: 0 2px 0 var(--accent);
+}
+
 /* ----------------------------------------------------------------- folders */
 
 .folders {

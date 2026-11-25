@@ -54,6 +54,8 @@ pub const MAX_ATTACHMENT_BYTES: usize = 24 * 1024 * 1024;
 const MAX_NAME_CHARS: usize = 255;
 const MAX_FOLDER_BYTES: usize = 200;
 const FALLBACK_MIME: &str = "application/octet-stream";
+/// The attributes of an attachment block that identify its file.
+const FILE_ATTRS: [&str; 4] = ["hash", "key", "size", "mime"];
 
 /// `code` is stable and meant for the user interface to switch on; `message`
 /// is for logs and as a fallback text.
@@ -1234,11 +1236,13 @@ impl<P: Platform> Core<P> {
         if (payload.kind == "header") != (kind == "header") {
             return Err(CoreError::input("a header stays a header"));
         }
-        // An attachment keeps its file; only its name (the text) can change.
-        if (payload.kind == "attachment" || kind == "attachment")
-            && (payload.kind != kind || payload.attrs != attrs)
-        {
-            return Err(CoreError::input("an attachment stays an attachment"));
+        // An attachment keeps its file. Its name (the text) and how it is
+        // shown (width, alignment, caption) can change.
+        if payload.kind == "attachment" || kind == "attachment" {
+            let file = |attrs: &BTreeMap<String, String>| FILE_ATTRS.map(|name| attrs.get(name).cloned());
+            if payload.kind != kind || file(&payload.attrs) != file(&attrs) {
+                return Err(CoreError::input("an attachment stays an attachment"));
+            }
         }
         if payload.kind == kind && payload.text == text && payload.attrs == attrs {
             return Ok(());
@@ -1246,6 +1250,35 @@ impl<P: Platform> Core<P> {
         payload.kind = kind.to_string();
         payload.text = text.to_string();
         payload.attrs = attrs;
+        self.write_block(block_id, &note_id, Some(payload)).await
+    }
+
+    /// Moves a block within its note: behind the block `after`, or to the
+    /// top without it.
+    pub async fn move_block(&self, block_id: &str, after: Option<&str>) -> Result<()> {
+        let (note_id, mut payload) = {
+            let state = self.state.borrow();
+            let Some(block) = state.blocks.get(block_id) else {
+                return Err(CoreError::new("not_found", "this block does not exist any more"));
+            };
+            let Some(payload) = block.payload.clone().filter(|p| p.kind != "header") else {
+                return Err(CoreError::new("not_found", "this block does not exist any more"));
+            };
+            let note_id = block.envelope.note_id.clone();
+            let (_, content) = Self::note_blocks(&state, &note_id);
+            // The neighbours at the new place, not counting the block itself.
+            let others: Vec<&Block> = content.into_iter().filter(|b| b.envelope.block_id != block_id).collect();
+            let index = match after {
+                Some(after) if after == block_id => return Ok(()),
+                Some(after) => others.iter().position(|b| b.envelope.block_id == after).map_or(others.len(), |i| i + 1),
+                None => 0,
+            };
+            let order_at = |i: usize| others.get(i).and_then(|b| b.payload.as_ref()).map(|p| p.order.as_str());
+            let low = if index == 0 { "" } else { order_at(index - 1).unwrap_or("") };
+            let order = order::between(low, order_at(index));
+            (note_id, Payload { order, ..payload })
+        };
+        payload.schema = 1;
         self.write_block(block_id, &note_id, Some(payload)).await
     }
 
